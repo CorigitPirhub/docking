@@ -1,0 +1,52 @@
+{
+  "config": {
+    "num_random_scenarios": 120,
+    "seed_base": 42,
+    "max_sim_time": 30.0
+  },
+  "summaries": [
+    {
+      "name": "dock_1_to_1",
+      "total": 120,
+      "success_rate": 1.0,
+      "avg_time": 3.368749999999996,
+      "p95_time": 4.049999999999994,
+      "avg_pos_error": 1.1420375815381768e-16,
+      "avg_yaw_error_deg": 0.0,
+      "avg_speed_error": 0.0,
+      "min_clearance": 0.10839542196289305,
+      "emergency_events": 0
+    },
+    {
+      "name": "dock_1_to_2train",
+      "total": 120,
+      "success_rate": 1.0,
+      "avg_time": 2.6599999999999984,
+      "p95_time": 3.2999999999999963,
+      "avg_pos_error": 6.418476861114186e-17,
+      "avg_yaw_error_deg": 0.0,
+      "avg_speed_error": 0.0,
+      "min_clearance": 1.4882761667741178,
+      "emergency_events": 0
+    },
+    {
+      "name": "dock_1_to_3train",
+      "total": 120,
+      "success_rate": 1.0,
+      "avg_time": 1.57875,
+      "p95_time": 2.502499999999999,
+      "avg_pos_error": 0.0,
+      "avg_yaw_error_deg": 0.0,
+      "avg_speed_error": 0.0,
+      "min_clearance": 2.32933373542421,
+      "emergency_events": 244
+    }
+  ],
+  "targets": {
+    "task_success_rate_min": 0.95,
+    "single_pos_error_max": 0.02,
+    "single_yaw_error_deg_max": 5.0,
+    "single_dock_time_max": 15.0,
+    "min_clearance_min": 0.1
+  }
+}

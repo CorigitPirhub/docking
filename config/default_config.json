@@ -1,0 +1,149 @@
+{
+  "vehicle": {
+    "car_length": 1.0,
+    "car_width": 0.4,
+    "wheelbase": 0.7,
+    "hitch_length": 0.3,
+    "front_overhang": 0.15,
+    "rear_overhang": 0.15,
+    "min_turn_radius_single": 1.0,
+    "max_steer_deg": 35.0,
+    "max_steer_rate_deg_s": 30.0,
+    "max_speed": 2.0,
+    "max_reverse_speed": 0.5,
+    "max_accel": 1.0,
+    "max_decel": 1.5,
+    "max_yaw_rate": 2.0
+  },
+  "sensors": {
+    "global": {
+      "sigma_pos": 0.05,
+      "sigma_yaw_deg": 3.0,
+      "rate_hz": 10.0
+    },
+    "vision": {
+      "fov_deg": 120.0,
+      "max_distance": 1.5,
+      "sigma_pos": 0.01,
+      "sigma_yaw_deg": 1.0,
+      "rate_hz": 30.0
+    }
+  },
+  "docking": {
+    "stage_switch_distance": 1.5,
+    "blend_distance_min": 1.2,
+    "blend_distance_max": 1.8,
+    "lock_position_tol": 0.02,
+    "lock_heading_tol_deg": 5.0,
+    "lock_speed_tol": 0.1,
+    "lock_hold_s": 0.5,
+    "max_alignment_angle_deg": 35.0,
+    "recovery_visual_loss_timeout_s": 0.8,
+    "recovery_backoff_distance": 0.4,
+    "soft_capture_distance": 0.6,
+    "soft_capture_max_yaw_deg": 10.0,
+    "soft_capture_max_speed_error": 0.1,
+    "soft_capture_max_position_correction": 0.01,
+    "soft_capture_max_yaw_correction_deg": 1.5,
+    "soft_capture_velocity_blend": 0.3,
+    "lock_transition_max_position_jump": 0.03,
+    "lock_transition_max_yaw_jump_deg": 3.0,
+    "lock_transition_max_speed_jump": 0.15,
+    "cmd_smooth_max_accel_step": 0.25,
+    "cmd_smooth_max_steer_rate_step": 0.25
+  },
+  "safety": {
+    "min_clearance": 0.1,
+    "jackknife_max_deg": 45.0,
+    "emergency_brake": -1.5,
+    "swept_sample_distance": 0.05,
+    "swept_min_steps": 4,
+    "swept_max_steps": 25
+  },
+  "control": {
+    "dt": 0.05,
+    "main_rate_hz": 20.0,
+    "mid_rate_hz": 10.0,
+    "high_rate_hz": 1.0,
+    "pure_pursuit": {
+      "lookahead_min": 0.6,
+      "lookahead_gain": 0.4
+    },
+    "stanley": {
+      "k": 1.2,
+      "softening": 0.2
+    },
+    "speed": {
+      "kp": 1.8,
+      "max_accel_cmd": 1.0
+    },
+    "train": {
+      "curvature_speed_gain": 1.8,
+      "min_speed": 0.08,
+      "max_speed": 0.8,
+      "curvature_lookahead_points": 18,
+      "feasible_radius_margin": 0.1
+    }
+  },
+  "planner": {
+    "horizon_steps": 12,
+    "sample_accel": [-1.0, -0.5, 0.0, 0.5, 1.0],
+    "sample_steer_rate_deg": [-30.0, -15.0, 0.0, 15.0, 30.0],
+    "goal_weight": 3.0,
+    "heading_weight": 0.6,
+    "clearance_weight": 0.4,
+    "smooth_weight": 0.1
+  },
+  "environment": {
+    "width": 40.0,
+    "height": 20.0,
+    "resolution": 0.05
+  },
+  "testing": {
+    "random_seed": 42,
+    "num_random_scenarios": 120,
+    "max_sim_time": 30.0,
+    "acceptance_seed_per_case": 50,
+    "acceptance_docking_seeds": 200
+  },
+  "scenario": {
+    "path_samples": 220,
+    "corridor_half_width": 2.0,
+    "width_req_base_margin": 0.08,
+    "width_req_per_trailer": 0.12,
+    "sweep_gain_curvature": 0.2,
+    "kappa_lookup_max": 1.0,
+    "kappa_lookup_bins": 120,
+    "dock_clearance_min": 0.6,
+    "dock_obs_density_max": 0.2,
+    "dock_los_min": 0.9,
+    "dock_kappa_max": 0.12,
+    "los_check_distance": 1.0,
+    "density_window_length": 2.0,
+    "density_window_width": 1.4,
+    "spawn_clearance_min": 0.25,
+    "cluster_radius": 1.2,
+    "uniform_spacing": 3.0,
+    "initial_pose_jitter": 0.08,
+    "ray_step": 0.05,
+    "ray_max_distance": 10.0,
+    "representative_vehicle_count": 6,
+    "validation_seeds_per_subtype": 60,
+    "validation_min_pass_rate": 0.95,
+    "gate_wall_thickness": 0.9,
+    "gate_turn_y_offset": 0.9,
+    "b_type_kappa_max": 0.25,
+    "turning_gate_kappa_min": 0.08,
+    "turning_gate_y_span_min": 1.0,
+    "validation_grid_resolution": 0.2,
+    "validation_gate_block_margin": 0.3,
+    "c_reconfig_window_ratio": 0.2
+  },
+  "coordinator": {
+    "command_ttl_s": 5.0,
+    "feasibility_dock_time_est_s": 10.0,
+    "feasibility_margin_s": 5.0,
+    "feasibility_recover_hysteresis_s": 1.5,
+    "max_command_queue": 128
+  }
+}
