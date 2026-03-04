@@ -1,0 +1,288 @@
+{
+  "config": {
+    "duration_s": 60.0,
+    "n_vehicles": 2,
+    "base_seed": 42,
+    "seeds_per_subtype": 1,
+    "subtypes": [
+      "B1"
+    ],
+    "dispersion_modes": [
+      "Random_Scattered"
+    ],
+    "inject_disturbance": false,
+    "enable_sensor_noise": false,
+    "total_runs": 3,
+    "policy_specs": [
+      {
+        "policy_id": "integrated_split_priority",
+        "policy": "integrated",
+        "conflict_policy": "split_priority"
+      },
+      {
+        "policy_id": "integrated_dock_priority",
+        "policy": "integrated",
+        "conflict_policy": "dock_priority"
+      },
+      {
+        "policy_id": "independent",
+        "policy": "independent",
+        "conflict_policy": "split_priority"
+      }
+    ]
+  },
+  "thresholds": {
+    "success_rate_min": 0.95,
+    "done_within_60_rate_min": 0.9,
+    "feasibility_accuracy_min": 0.9,
+    "collision_total_max": 0
+  },
+  "aggregates": {
+    "integrated_split_priority": {
+      "policy_id": "integrated_split_priority",
+      "num_runs": 1,
+      "success_rate": 0.0,
+      "done_within_60_rate": 0.0,
+      "collision_total": 1,
+      "avg_done_time_s": 60.0,
+      "avg_energy": 38.26262218915256,
+      "feasibility_accuracy": 0.0,
+      "feasibility_samples": 1099
+    },
+    "integrated_dock_priority": {
+      "policy_id": "integrated_dock_priority",
+      "num_runs": 1,
+      "success_rate": 0.0,
+      "done_within_60_rate": 0.0,
+      "collision_total": 1,
+      "avg_done_time_s": 60.0,
+      "avg_energy": 38.26262218915256,
+      "feasibility_accuracy": 0.0,
+      "feasibility_samples": 1099
+    },
+    "independent": {
+      "policy_id": "independent",
+      "num_runs": 1,
+      "success_rate": 0.0,
+      "done_within_60_rate": 0.0,
+      "collision_total": 0,
+      "avg_done_time_s": 60.0,
+      "avg_energy": 40.12982918533401,
+      "feasibility_accuracy": 1.0,
+      "feasibility_samples": 0
+    }
+  },
+  "subtype_breakdown": {
+    "integrated_split_priority": {
+      "B1": {
+        "policy_id": "B1",
+        "num_runs": 1,
+        "success_rate": 0.0,
+        "done_within_60_rate": 0.0,
+        "collision_total": 1,
+        "avg_done_time_s": 60.0,
+        "avg_energy": 38.26262218915256,
+        "feasibility_accuracy": 0.0,
+        "feasibility_samples": 1099
+      }
+    },
+    "integrated_dock_priority": {
+      "B1": {
+        "policy_id": "B1",
+        "num_runs": 1,
+        "success_rate": 0.0,
+        "done_within_60_rate": 0.0,
+        "collision_total": 1,
+        "avg_done_time_s": 60.0,
+        "avg_energy": 38.26262218915256,
+        "feasibility_accuracy": 0.0,
+        "feasibility_samples": 1099
+      }
+    },
+    "independent": {
+      "B1": {
+        "policy_id": "B1",
+        "num_runs": 1,
+        "success_rate": 0.0,
+        "done_within_60_rate": 0.0,
+        "collision_total": 0,
+        "avg_done_time_s": 60.0,
+        "avg_energy": 40.12982918533401,
+        "feasibility_accuracy": 1.0,
+        "feasibility_samples": 0
+      }
+    }
+  },
+  "comparisons": {
+    "main_vs_independent": {
+      "delta_success_rate": 0.0,
+      "delta_done_within_60_rate": 0.0,
+      "delta_avg_done_time_s": 0.0,
+      "delta_avg_energy_pct": -0.046529153851067165,
+      "delta_collision_total": 1.0
+    },
+    "main_vs_integrated_dock_priority": {
+      "delta_success_rate": 0.0,
+      "delta_done_within_60_rate": 0.0,
+      "delta_avg_done_time_s": 0.0,
+      "delta_avg_energy_pct": 0.0,
+      "delta_collision_total": 0.0
+    }
+  },
+  "pass_flags": {
+    "success_rate": false,
+    "done_within_60_rate": false,
+    "feasibility_accuracy": false,
+    "collision_total": false
+  },
+  "gate6_ready": false,
+  "failure_cases": [
+    {
+      "policy_id": "integrated_split_priority",
+      "scenario_id": "B1_seed42_n2_Random_Scattered",
+      "subtype": "B1",
+      "seed": 42,
+      "dispersion_mode": "Random_Scattered",
+      "reason": "collision",
+      "done_time_s": 60.0,
+      "collision_count": 1,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "feasibility_abort_count": 0,
+      "events_count": {
+        "COMMAND_QUEUED": 1,
+        "DOCKING_STARTED": 1,
+        "collision": 1,
+        "submit_dock": 1
+      },
+      "pending_snapshots": 1099
+    },
+    {
+      "policy_id": "integrated_dock_priority",
+      "scenario_id": "B1_seed42_n2_Random_Scattered",
+      "subtype": "B1",
+      "seed": 42,
+      "dispersion_mode": "Random_Scattered",
+      "reason": "collision",
+      "done_time_s": 60.0,
+      "collision_count": 1,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "feasibility_abort_count": 0,
+      "events_count": {
+        "COMMAND_QUEUED": 1,
+        "DOCKING_STARTED": 1,
+        "collision": 1,
+        "submit_dock": 1
+      },
+      "pending_snapshots": 1099
+    },
+    {
+      "policy_id": "independent",
+      "scenario_id": "B1_seed42_n2_Random_Scattered",
+      "subtype": "B1",
+      "seed": 42,
+      "dispersion_mode": "Random_Scattered",
+      "reason": "timeout_or_unfinished",
+      "done_time_s": 60.0,
+      "collision_count": 0,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "feasibility_abort_count": 0,
+      "events_count": {},
+      "pending_snapshots": 0
+    }
+  ],
+  "runs": [
+    {
+      "scenario_id": "B1_seed42_n2_Random_Scattered",
+      "subtype": "B1",
+      "policy": "integrated",
+      "conflict_policy": "split_priority",
+      "enable_sensor_noise": false,
+      "success": false,
+      "done_within_60": false,
+      "done_time_s": 60.0,
+      "total_energy": 38.26262218915256,
+      "collision_count": 1,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "p4_interruption_count": 0,
+      "p4_replan_success_count": 0,
+      "p4_abort_to_independent_count": 0,
+      "feasibility_abort_count": 0,
+      "leader_final_train_size": 1,
+      "commands_submitted": 1,
+      "commands_accepted": 1,
+      "command_exec_accept": 1,
+      "command_exec_reject": 0,
+      "command_exec_rate": 1.0,
+      "feasibility_correct": 0,
+      "feasibility_total": 1099,
+      "policy_id": "integrated_split_priority",
+      "seed": 42,
+      "dispersion_mode": "Random_Scattered",
+      "n_vehicles": 2
+    },
+    {
+      "scenario_id": "B1_seed42_n2_Random_Scattered",
+      "subtype": "B1",
+      "policy": "integrated",
+      "conflict_policy": "dock_priority",
+      "enable_sensor_noise": false,
+      "success": false,
+      "done_within_60": false,
+      "done_time_s": 60.0,
+      "total_energy": 38.26262218915256,
+      "collision_count": 1,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "p4_interruption_count": 0,
+      "p4_replan_success_count": 0,
+      "p4_abort_to_independent_count": 0,
+      "feasibility_abort_count": 0,
+      "leader_final_train_size": 1,
+      "commands_submitted": 1,
+      "commands_accepted": 1,
+      "command_exec_accept": 1,
+      "command_exec_reject": 0,
+      "command_exec_rate": 1.0,
+      "feasibility_correct": 0,
+      "feasibility_total": 1099,
+      "policy_id": "integrated_dock_priority",
+      "seed": 42,
+      "dispersion_mode": "Random_Scattered",
+      "n_vehicles": 2
+    },
+    {
+      "scenario_id": "B1_seed42_n2_Random_Scattered",
+      "subtype": "B1",
+      "policy": "independent",
+      "conflict_policy": "split_priority",
+      "enable_sensor_noise": false,
+      "success": false,
+      "done_within_60": false,
+      "done_time_s": 60.0,
+      "total_energy": 40.12982918533401,
+      "collision_count": 0,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "p4_interruption_count": 0,
+      "p4_replan_success_count": 0,
+      "p4_abort_to_independent_count": 0,
+      "feasibility_abort_count": 0,
+      "leader_final_train_size": 1,
+      "commands_submitted": 0,
+      "commands_accepted": 0,
+      "command_exec_accept": 0,
+      "command_exec_reject": 0,
+      "command_exec_rate": 1.0,
+      "feasibility_correct": 0,
+      "feasibility_total": 0,
+      "policy_id": "independent",
+      "seed": 42,
+      "dispersion_mode": "Random_Scattered",
+      "n_vehicles": 2
+    }
+  ]
+}

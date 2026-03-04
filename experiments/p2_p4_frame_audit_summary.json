@@ -1,0 +1,36 @@
+{
+  "num_cases": 3,
+  "total_violations": 0,
+  "cases": [
+    {
+      "case_name": "A",
+      "scenario_id": "A2_seed51042_n2_Clustered_At_A",
+      "violation_count": 0,
+      "by_type": {},
+      "dock_success_count": 1,
+      "split_count": 0,
+      "collision_count": 0,
+      "done_time_s": 45.649999999999544
+    },
+    {
+      "case_name": "B",
+      "scenario_id": "B1_seed62042_n2_Uniform_Spread",
+      "violation_count": 0,
+      "by_type": {},
+      "dock_success_count": 0,
+      "split_count": 1,
+      "collision_count": 0,
+      "done_time_s": 53.79999999999908
+    },
+    {
+      "case_name": "C",
+      "scenario_id": "A2_seed51042_n2_Clustered_At_A",
+      "violation_count": 0,
+      "by_type": {},
+      "dock_success_count": 1,
+      "split_count": 0,
+      "collision_count": 0,
+      "done_time_s": 44.049999999999635
+    }
+  ]
+}

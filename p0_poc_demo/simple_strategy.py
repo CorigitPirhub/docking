@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from docking.runtime_support import CommandHeader, DockingCommand, ReconfigRuntimeEngine, SplitCommand, WaitCommand
+from docking.runtime_support import ReconfigRuntimeEngine
+from runtime.command_bus import CommandHeader, DockingCommand, SplitCommand, WaitCommand
 
 
 @dataclass(frozen=True)
@@ -48,8 +49,10 @@ class P0RuleStrategy:
     def _submit_dock(self, engine: ReconfigRuntimeEngine, now: float, follower: int, leader: int) -> None:
         hdr = CommandHeader(
             command_id=self._next_id(),
+            state_seq=int(engine.state_seq),
             issued_at=now,
-            valid_for_s=engine.cfg.coordinator.command_ttl_s,
+            deadline_at=float(now + engine.cfg.coordinator.command_ttl_s),
+            priority=5,
             source="p0_rule_strategy",
         )
         engine.submit_command(DockingCommand(header=hdr, follower_id=follower, leader_id=leader), now=now)
@@ -57,8 +60,10 @@ class P0RuleStrategy:
     def _submit_split(self, engine: ReconfigRuntimeEngine, now: float, parent: int, child: int, reason: str) -> None:
         hdr = CommandHeader(
             command_id=self._next_id(),
+            state_seq=int(engine.state_seq),
             issued_at=now,
-            valid_for_s=engine.cfg.coordinator.command_ttl_s,
+            deadline_at=float(now + engine.cfg.coordinator.command_ttl_s),
+            priority=10,
             source="p0_rule_strategy",
         )
         engine.submit_command(SplitCommand(header=hdr, parent_id=parent, child_id=child, reason=reason), now=now)
@@ -66,8 +71,10 @@ class P0RuleStrategy:
     def _submit_wait(self, engine: ReconfigRuntimeEngine, now: float, vehicle_id: int, duration_s: float) -> None:
         hdr = CommandHeader(
             command_id=self._next_id(),
+            state_seq=int(engine.state_seq),
             issued_at=now,
-            valid_for_s=engine.cfg.coordinator.command_ttl_s,
+            deadline_at=float(now + engine.cfg.coordinator.command_ttl_s),
+            priority=1,
             source="p0_rule_strategy",
         )
         engine.submit_command(
@@ -116,7 +123,7 @@ class P0RuleStrategy:
         self._last_decision_t = now
 
         # Avoid queueing too aggressively in PoC.
-        if engine.queue:
+        if engine.bus.queue:
             return
 
         if (not self._wait_issued) and now >= self.cfg.wait_start_s:

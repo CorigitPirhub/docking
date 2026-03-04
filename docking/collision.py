@@ -120,6 +120,8 @@ class CollisionEngine:
                 continue
             if polygons_intersect(poly, obs_poly):
                 return True
+            if needed <= 0.0:
+                continue
             clearance = polygon_distance(poly, obs_poly)
             if clearance < needed:
                 return True
@@ -137,10 +139,28 @@ class CollisionEngine:
                     continue
                 if polygons_intersect(poly_a, poly_b):
                     return True
+                if needed <= 0.0:
+                    continue
                 clearance = polygon_distance(poly_a, poly_b)
                 if clearance < needed:
                     return True
         return False
+
+    def min_clearance_vehicle_vehicle(self, a: VehicleState, b: VehicleState) -> float:
+        d_min = math.inf
+        polys_a = self.vehicle_polygons(a)
+        polys_b = self.vehicle_polygons(b)
+        bboxes_a = [polygon_bbox(p) for p in polys_a]
+        bboxes_b = [polygon_bbox(p) for p in polys_b]
+        for poly_a, box_a in zip(polys_a, bboxes_a):
+            for poly_b, box_b in zip(polys_b, bboxes_b):
+                box_d = bbox_distance(box_a, box_b)
+                if box_d > d_min:
+                    continue
+                d_min = min(d_min, polygon_distance(poly_a, poly_b))
+        if math.isinf(d_min):
+            return 1e6
+        return float(d_min)
 
     def collide_vehicle_train(
         self,

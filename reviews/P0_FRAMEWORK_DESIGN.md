@@ -108,9 +108,9 @@ StrategyStateSnapshot
 ```text
 CommandHeader
 - command_id: str
-- parent_state_seq: int          # 命令基于哪个状态版本生成
+- state_seq: int                 # 命令基于哪个状态版本生成
 - issued_at: float
-- valid_for_s: float             # TTL
+- deadline_at: float             # hard deadline
 - priority: int                  # 大值优先
 - source: str                    # strategy_id
 - can_preempt: bool
@@ -137,12 +137,13 @@ WaitCommand
 ```text
 CommandFeedback
 - command_id: str
-- stage: submit | execute | done
+- kind: DOCK | SPLIT | WAIT
+- stage: SUBMIT | EXEC | DONE
+- status: QUEUED | RUNNING | SUCCESS | FAILED | REJECTED
 - accepted: bool
-- status: queued | running | success | failed
-- reason_code: str
-- event_time: float
-- state_seq_after: int
+- error_code: ErrorCode
+- t: float
+- detail: str
 ```
 
 ---
@@ -164,13 +165,13 @@ Cmd Submit:              C0      C1   C2            C3
 Mid Execute (8Hz):       e0 e1 e2 e3 e4 e5 e6 e7 e8 ...
 Low Control (20Hz):      l0 l1 l2 l3 l4 l5 l6 l7 l8 ...
 Feedback/Event:            ACK0  RUN0  DONE0  ACK1 FAIL1 ...
-Rule: command.parent_state_seq must match latest confirmed snapshot window
+Rule: command.state_seq must satisfy `state_seq <= current_state_seq` at submit/dispatch time
 ```
 
 ### 4.2 一致性规则
 
 1. `state_seq` 单调递增，策略只能基于已确认快照下发命令。
-2. 若 `now > issued_at + valid_for_s`，命令自动失效拒绝。
+2. 若 `now > deadline_at`，命令自动失效拒绝。
 3. 同一 `command_id` 只允许一次有效提交（去重）。
 4. 指令执行后必须返回终态反馈（`success/failed`）。
 
@@ -231,15 +232,15 @@ w_t \cdot T_{catch}
 
 现有能力可直接复用：
 
-1. `docking/runtime_support.py`
-- 已有 `DockingCommand/SplitCommand/WaitCommand`
-- 已有事件与 ACK 机制
-- 已有可完成性监控与多率执行器
+1. `runtime/command_bus.py` + `interface/strategy_control_api.md`
+- 已冻结 `CommandHeader/CommandFeedback` 与冲突仲裁规则
+
+2. `docking/runtime_support.py`
+- 作为 runtime 执行引擎：Topology 状态机 + 可完成性监控 + 多率执行器
+- 通过 `runtime/command_bus.py` 接入命令与反馈协议（不再维护第二套 CommandHeader/CommandKind）
 
 2. 需在 P1/P2 增补：
-- `parent_state_seq/priority/preempt` 字段
-- 冲突仲裁器（统一策略冲突分解）
-- 截获点选择器（基于共享轨迹）
+- 截获点选择器（基于共享轨迹，截获点必须是 leader path 上的 `s` 坐标）
 
 ---
 

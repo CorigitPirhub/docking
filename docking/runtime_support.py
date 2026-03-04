@@ -1,19 +1,23 @@
 from __future__ import annotations
 
 import math
-from collections import deque
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Callable
 
 from .config import Config, CoordinatorConfig
 from .types import VehicleMode
-
-
-class CommandKind(str, Enum):
-    DOCK = "DOCK"
-    SPLIT = "SPLIT"
-    WAIT = "WAIT"
+from runtime.command_bus import (
+    CommandBus,
+    CommandFeedback,
+    CommandKind,
+    DockingCommand,
+    FeedbackStage,
+    FeedbackStatus,
+    SplitCommand,
+    UnifiedCommand,
+    WaitCommand,
+)
 
 
 class LayerName(str, Enum):
@@ -32,61 +36,6 @@ class EventType(str, Enum):
     WAIT_STARTED = "WAIT_STARTED"
     WAIT_ENDED = "WAIT_ENDED"
     FEASIBILITY_FLIP = "FEASIBILITY_FLIP"
-
-
-@dataclass(frozen=True)
-class CommandHeader:
-    command_id: str
-    issued_at: float
-    valid_for_s: float
-    source: str = "strategy"
-
-    @property
-    def expires_at(self) -> float:
-        return self.issued_at + max(0.0, self.valid_for_s)
-
-
-@dataclass(frozen=True)
-class DockingCommand:
-    header: CommandHeader
-    follower_id: int
-    leader_id: int
-    intercept_s: float | None = None
-    kind: CommandKind = CommandKind.DOCK
-
-
-@dataclass(frozen=True)
-class SplitCommand:
-    header: CommandHeader
-    parent_id: int
-    child_id: int
-    reason: str = "split"
-    kind: CommandKind = CommandKind.SPLIT
-
-
-@dataclass(frozen=True)
-class WaitCommand:
-    header: CommandHeader
-    vehicle_id: int
-    duration_s: float
-    reason: str = "wait"
-    kind: CommandKind = CommandKind.WAIT
-
-
-UnifiedCommand = DockingCommand | SplitCommand | WaitCommand
-
-
-@dataclass(frozen=True)
-class CommandAck:
-    command_id: str
-    kind: CommandKind
-    accepted: bool
-    stage: str
-    reason: str
-    t: float
-
-    def to_dict(self) -> dict:
-        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -136,22 +85,6 @@ class MultiRateStats:
 
     def to_dict(self) -> dict:
         return asdict(self)
-
-
-def validate_command_common(cmd: UnifiedCommand, now: float) -> tuple[bool, str]:
-    if not cmd.header.command_id:
-        return False, "empty_command_id"
-    if cmd.header.valid_for_s <= 0.0:
-        return False, "non_positive_ttl"
-    if now > cmd.header.expires_at + 1e-9:
-        return False, "expired"
-    if isinstance(cmd, DockingCommand):
-        if cmd.follower_id == cmd.leader_id:
-            return False, "self_docking"
-    if isinstance(cmd, WaitCommand):
-        if cmd.duration_s < 0.0:
-            return False, "negative_wait_duration"
-    return True, "ok"
 
 
 class TopologyStateMachine:
@@ -328,6 +261,21 @@ class TaskFeasibilityMonitor:
     def evaluate(self, pending_docks: int, leader_remaining_s: float, now: float) -> FeasibilityDecision:
         pending = max(0, int(pending_docks))
         leader_remaining = max(0.0, float(leader_remaining_s))
+        if pending <= 0:
+            t_est = 0.0
+            feasible = True
+            flipped = feasible != self._last_feasible
+            self._last_feasible = feasible
+            return FeasibilityDecision(
+                t=now,
+                feasible=feasible,
+                flipped=flipped,
+                pending_docks=pending,
+                t_est=float(t_est),
+                leader_remaining_s=float(leader_remaining),
+                reason="ok_no_pending_docks",
+            )
+
         t_est = pending * self.cfg.feasibility_dock_time_est_s + self.cfg.feasibility_margin_s
 
         if self._last_feasible:
@@ -419,94 +367,89 @@ class ReconfigRuntimeEngine:
         self.cfg = cfg
         self.topology = TopologyStateMachine(vehicle_ids)
         self.feasibility = TaskFeasibilityMonitor(cfg.coordinator)
-        self.queue: deque[UnifiedCommand] = deque()
-        self.command_ids: set[str] = set()
+        self.bus = CommandBus(max_queue=cfg.coordinator.max_command_queue)
         self.events: list[RuntimeEvent] = []
-        self.acks: list[CommandAck] = []
         self.decisions: list[FeasibilityDecision] = []
         self.snapshots: list[RuntimeSnapshot] = []
         self.multi_rate_stats: MultiRateStats | None = None
+        self.state_seq: int = 0
+        self._dock_cmd_id_by_follower: dict[int, str] = {}
+        self._wait_cmd_id_by_vehicle: dict[int, str] = {}
 
     def _emit(self, t: float, event_type: EventType, vehicle_id: int | None = None, peer_id: int | None = None, detail: str = "") -> None:
         self.events.append(RuntimeEvent(t=float(t), event_type=event_type, vehicle_id=vehicle_id, peer_id=peer_id, detail=detail))
 
-    def submit_command(self, cmd: UnifiedCommand, now: float) -> CommandAck:
-        ok, reason = validate_command_common(cmd, now)
-        if not ok:
-            ack = CommandAck(command_id=cmd.header.command_id, kind=cmd.kind, accepted=False, stage="submit", reason=reason, t=now)
-            self.acks.append(ack)
-            self._emit(now, EventType.COMMAND_REJECTED, detail=f"{cmd.kind}:{reason}")
-            return ack
-        if cmd.header.command_id in self.command_ids:
-            ack = CommandAck(
-                command_id=cmd.header.command_id,
-                kind=cmd.kind,
-                accepted=False,
-                stage="submit",
-                reason="duplicate_command_id",
-                t=now,
-            )
-            self.acks.append(ack)
-            self._emit(now, EventType.COMMAND_REJECTED, detail=f"{cmd.kind}:duplicate_command_id")
-            return ack
-        if len(self.queue) >= self.cfg.coordinator.max_command_queue:
-            ack = CommandAck(command_id=cmd.header.command_id, kind=cmd.kind, accepted=False, stage="submit", reason="queue_full", t=now)
-            self.acks.append(ack)
-            self._emit(now, EventType.COMMAND_REJECTED, detail=f"{cmd.kind}:queue_full")
-            return ack
+    @property
+    def feedbacks(self) -> list[CommandFeedback]:
+        return self.bus.feedbacks
 
-        self.command_ids.add(cmd.header.command_id)
-        self.queue.append(cmd)
-        ack = CommandAck(command_id=cmd.header.command_id, kind=cmd.kind, accepted=True, stage="submit", reason="queued", t=now)
-        self.acks.append(ack)
-        self._emit(now, EventType.COMMAND_QUEUED, detail=f"{cmd.kind}")
-        return ack
+    def submit_command(self, cmd: UnifiedCommand, now: float) -> CommandFeedback:
+        fb = self.bus.submit(cmd, now=now, current_state_seq=self.state_seq)
+        if fb.accepted:
+            self._emit(now, EventType.COMMAND_QUEUED, detail=f"{cmd.kind}")
+        else:
+            self._emit(now, EventType.COMMAND_REJECTED, detail=f"{cmd.kind}:{fb.error_code.value}:{fb.detail}")
+        return fb
 
     def mark_docking_locked(self, follower_id: int, leader_id: int, now: float) -> bool:
         ok, reason = self.topology.finalize_docking(follower_id, leader_id, now)
+        cmd_id = self._dock_cmd_id_by_follower.pop(int(follower_id), None)
         if ok:
             self._emit(now, EventType.DOCK_LOCKED, vehicle_id=follower_id, peer_id=leader_id, detail="locked")
         else:
             self._emit(now, EventType.COMMAND_REJECTED, vehicle_id=follower_id, peer_id=leader_id, detail=f"lock_fail:{reason}")
+        if cmd_id is not None:
+            self.bus.complete(command_id=cmd_id, success=ok, now=now, detail=f"dock_lock:{reason}")
+        return ok
+
+    def abort_docking(self, follower_id: int, now: float, detail: str = "abort") -> bool:
+        follower_id = int(follower_id)
+        leader = self.topology.docking_target.get(follower_id, None)
+        ok = self.topology.abort_docking(follower_id, now)
+        cmd_id = self._dock_cmd_id_by_follower.pop(follower_id, None)
+        if ok:
+            self._emit(now, EventType.DOCKING_ABORTED, vehicle_id=follower_id, peer_id=leader, detail=detail)
+        if cmd_id is not None:
+            self.bus.complete(command_id=cmd_id, success=False, now=now, detail=f"dock_abort:{detail}")
         return ok
 
     def _process_command_mid(self, now: float) -> None:
-        if not self.queue:
+        selected = self.bus.dispatch(
+            now=now,
+            current_state_seq=self.state_seq,
+            active_commands=list(self.bus.inflight.values()),
+            max_dispatch=1,
+        )
+        if not selected:
             return
-        cmd = self.queue.popleft()
-        ok, reason = validate_command_common(cmd, now)
-        if not ok:
-            ack = CommandAck(cmd.header.command_id, cmd.kind, False, "execute", reason, now)
-            self.acks.append(ack)
-            self._emit(now, EventType.COMMAND_REJECTED, detail=f"{cmd.kind}:{reason}")
-            return
+        for cmd in selected:
+            if isinstance(cmd, DockingCommand):
+                ok, reason = self.topology.start_docking(cmd.follower_id, cmd.leader_id, now)
+                if ok:
+                    self._dock_cmd_id_by_follower[int(cmd.follower_id)] = cmd.header.command_id
+                    self._emit(now, EventType.DOCKING_STARTED, vehicle_id=cmd.follower_id, peer_id=cmd.leader_id, detail="started")
+                else:
+                    self._emit(now, EventType.COMMAND_REJECTED, vehicle_id=cmd.follower_id, peer_id=cmd.leader_id, detail=f"dock:{reason}")
+                    self.bus.complete(command_id=cmd.header.command_id, success=False, now=now, detail=f"dock_start:{reason}")
+                continue
 
-        if isinstance(cmd, DockingCommand):
-            ok, reason = self.topology.start_docking(cmd.follower_id, cmd.leader_id, now)
-            self.acks.append(CommandAck(cmd.header.command_id, cmd.kind, ok, "execute", reason, now))
+            if isinstance(cmd, SplitCommand):
+                ok, reason = self.topology.apply_split(cmd.parent_id, cmd.child_id, now)
+                if ok:
+                    self._emit(now, EventType.SPLIT_DONE, vehicle_id=cmd.child_id, peer_id=cmd.parent_id, detail=cmd.reason)
+                else:
+                    self._emit(now, EventType.COMMAND_REJECTED, vehicle_id=cmd.child_id, peer_id=cmd.parent_id, detail=f"split:{reason}")
+                self.bus.complete(command_id=cmd.header.command_id, success=ok, now=now, detail=f"split:{reason}")
+                continue
+
+            assert isinstance(cmd, WaitCommand)
+            ok, reason = self.topology.apply_wait(cmd.vehicle_id, cmd.duration_s, now)
             if ok:
-                self._emit(now, EventType.DOCKING_STARTED, vehicle_id=cmd.follower_id, peer_id=cmd.leader_id, detail="started")
+                self._wait_cmd_id_by_vehicle[int(cmd.vehicle_id)] = cmd.header.command_id
+                self._emit(now, EventType.WAIT_STARTED, vehicle_id=cmd.vehicle_id, detail=cmd.reason)
             else:
-                self._emit(now, EventType.COMMAND_REJECTED, vehicle_id=cmd.follower_id, peer_id=cmd.leader_id, detail=f"dock:{reason}")
-            return
-
-        if isinstance(cmd, SplitCommand):
-            ok, reason = self.topology.apply_split(cmd.parent_id, cmd.child_id, now)
-            self.acks.append(CommandAck(cmd.header.command_id, cmd.kind, ok, "execute", reason, now))
-            if ok:
-                self._emit(now, EventType.SPLIT_DONE, vehicle_id=cmd.child_id, peer_id=cmd.parent_id, detail=cmd.reason)
-            else:
-                self._emit(now, EventType.COMMAND_REJECTED, vehicle_id=cmd.child_id, peer_id=cmd.parent_id, detail=f"split:{reason}")
-            return
-
-        # WaitCommand
-        assert isinstance(cmd, WaitCommand)
-        ok, reason = self.topology.apply_wait(cmd.vehicle_id, cmd.duration_s, now)
-        self.acks.append(CommandAck(cmd.header.command_id, cmd.kind, ok, "execute", reason, now))
-        if ok:
-            self._emit(now, EventType.WAIT_STARTED, vehicle_id=cmd.vehicle_id, detail=cmd.reason)
-        else:
-            self._emit(now, EventType.COMMAND_REJECTED, vehicle_id=cmd.vehicle_id, detail=f"wait:{reason}")
+                self._emit(now, EventType.COMMAND_REJECTED, vehicle_id=cmd.vehicle_id, detail=f"wait:{reason}")
+                self.bus.complete(command_id=cmd.header.command_id, success=False, now=now, detail=f"wait:{reason}")
 
     def _handle_high_tick(self, now: float, leader_remaining_s: float) -> None:
         pending = len(self.topology.docking_target)
@@ -518,14 +461,15 @@ class ReconfigRuntimeEngine:
         if not decision.feasible and self.topology.docking_target:
             followers = sorted(list(self.topology.docking_target.keys()))
             for f in followers:
-                leader = self.topology.docking_target.get(f, None)
-                if self.topology.abort_docking(f, now):
-                    self._emit(now, EventType.DOCKING_ABORTED, vehicle_id=f, peer_id=leader, detail="feasibility_infeasible")
+                self.abort_docking(f, now=now, detail="feasibility_infeasible")
 
     def _handle_low_tick(self, now: float) -> None:
         ended = self.topology.tick(now)
         for vid in ended:
             self._emit(now, EventType.WAIT_ENDED, vehicle_id=vid, detail="timeout")
+            cmd_id = self._wait_cmd_id_by_vehicle.pop(int(vid), None)
+            if cmd_id is not None:
+                self.bus.complete(command_id=cmd_id, success=True, now=now, detail="wait_done")
 
         feasible = self.decisions[-1].feasible if self.decisions else True
         self.snapshots.append(
@@ -537,6 +481,7 @@ class ReconfigRuntimeEngine:
                 feasible=feasible,
             )
         )
+        self.state_seq += 1
 
     def run(
         self,
@@ -562,4 +507,3 @@ class ReconfigRuntimeEngine:
 
     def check_invariants(self) -> tuple[bool, str]:
         return self.topology.check_invariants()
-

@@ -2,14 +2,14 @@ import numpy as np
 
 from docking.config import load_config
 from docking.runtime_support import (
-    CommandHeader,
-    DockingCommand,
     MultiRateExecutor,
     ReconfigRuntimeEngine,
+    TaskFeasibilityMonitor,
     TopologyStateMachine,
     estimate_leader_remaining_time,
 )
 from docking.types import VehicleMode
+from runtime.command_bus import CommandHeader, DockingCommand
 
 
 def test_command_interface_and_docking_execution():
@@ -18,7 +18,7 @@ def test_command_interface_and_docking_execution():
 
     ack0 = engine.submit_command(
         DockingCommand(
-            header=CommandHeader(command_id="dock_1", issued_at=0.0, valid_for_s=5.0),
+            header=CommandHeader(command_id="dock_1", state_seq=0, issued_at=0.0, deadline_at=5.0, priority=5),
             follower_id=2,
             leader_id=1,
         ),
@@ -29,7 +29,7 @@ def test_command_interface_and_docking_execution():
     # duplicate command id should be rejected
     ack_dup = engine.submit_command(
         DockingCommand(
-            header=CommandHeader(command_id="dock_1", issued_at=0.0, valid_for_s=5.0),
+            header=CommandHeader(command_id="dock_1", state_seq=0, issued_at=0.0, deadline_at=5.0, priority=5),
             follower_id=3,
             leader_id=1,
         ),
@@ -79,7 +79,7 @@ def test_feasibility_abort_switch_logic():
     engine = ReconfigRuntimeEngine(cfg, [1, 2, 3])
     engine.submit_command(
         DockingCommand(
-            header=CommandHeader(command_id="dock_abort", issued_at=0.0, valid_for_s=5.0),
+            header=CommandHeader(command_id="dock_abort", state_seq=0, issued_at=0.0, deadline_at=5.0, priority=5),
             follower_id=2,
             leader_id=1,
         ),
@@ -97,6 +97,20 @@ def test_feasibility_abort_switch_logic():
     assert len(abort_events) >= 1
     assert engine.topology.mode[2] == VehicleMode.FREE
     assert any(d.flipped and (not d.feasible) for d in engine.decisions)
+
+
+def test_feasibility_monitor_no_pending_is_always_feasible():
+    cfg = load_config()
+    mon = TaskFeasibilityMonitor(cfg.coordinator)
+    d0 = mon.evaluate(pending_docks=0, leader_remaining_s=0.0, now=0.0)
+    assert d0.feasible
+    assert d0.reason == "ok_no_pending_docks"
+
+    # Even if previously infeasible, no pending docks should recover immediately.
+    _ = mon.evaluate(pending_docks=2, leader_remaining_s=0.5, now=1.0)
+    d2 = mon.evaluate(pending_docks=0, leader_remaining_s=0.1, now=2.0)
+    assert d2.feasible
+    assert d2.reason == "ok_no_pending_docks"
 
 
 def test_multirate_executor_counts_and_order():

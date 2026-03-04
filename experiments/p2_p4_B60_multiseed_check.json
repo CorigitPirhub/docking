@@ -1,0 +1,31 @@
+{
+  "config": {
+    "num_seeds": 1,
+    "base_seed": 62042,
+    "runner_seed_base": 2002,
+    "duration_s": 60.0,
+    "scenario_subtype": "B1"
+  },
+  "summary": {
+    "num_runs": 1,
+    "success_rate": 0.0,
+    "no_collision_rate": 1.0,
+    "no_plateau_rate": 1.0,
+    "avg_done_time_s": 60.0,
+    "freeze_threshold_s": 2.0,
+    "pass": false
+  },
+  "runs": [
+    {
+      "seed": 62042,
+      "scenario_id": "B1_seed62042_n2_Uniform_Spread",
+      "success": false,
+      "done_time_s": 60.0,
+      "collision_count": 0,
+      "split_count": 1,
+      "dock_success_count": 0,
+      "max_effective_freeze_s": 0.0,
+      "stall_like_plateau": false
+    }
+  ]
+}

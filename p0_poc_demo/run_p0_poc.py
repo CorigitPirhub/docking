@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from docking.config import load_config
 from docking.runtime_support import ReconfigRuntimeEngine
 from p0_poc_demo.simple_strategy import P0RuleStrategy
+from runtime.command_bus import FeedbackStage, FeedbackStatus
 
 
 def largest_train_size(edges: tuple[tuple[int, int], ...], vehicle_ids: tuple[int, ...]) -> int:
@@ -57,7 +58,7 @@ def run_demo(duration_s: float = 24.0) -> tuple[ReconfigRuntimeEngine, dict]:
             if t - pending_seen[f] >= 0.8:
                 locked = rt.mark_docking_locked(f, l, now=t)
                 if (not locked) and (t - pending_seen[f] >= 2.0):
-                    rt.topology.abort_docking(f, now=t)
+                    rt.abort_docking(f, now=t, detail="p0_timeout_abort")
         for f in list(pending_seen.keys()):
             if f not in rt.topology.docking_target:
                 pending_seen.pop(f, None)
@@ -65,9 +66,9 @@ def run_demo(duration_s: float = 24.0) -> tuple[ReconfigRuntimeEngine, dict]:
     engine.run(duration_s=duration_s, leader_remaining_fn=leader_remaining_fn, low_tick_hook=low_hook)
 
     inv_ok, inv_reason = engine.check_invariants()
-    execute_acks = [a for a in engine.acks if a.stage == "execute"]
-    accept_n = sum(1 for a in execute_acks if a.accepted)
-    reject_n = sum(1 for a in execute_acks if not a.accepted)
+    exec_fbs = [f for f in engine.feedbacks if f.stage == FeedbackStage.EXEC]
+    accept_n = sum(1 for f in exec_fbs if f.status == FeedbackStatus.RUNNING)
+    reject_n = sum(1 for f in exec_fbs if f.status == FeedbackStatus.REJECTED)
 
     ev_counter = Counter(e.event_type.value for e in engine.events)
     snapshots = engine.snapshots

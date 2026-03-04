@@ -12,7 +12,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from docking.config import load_config
-from docking.runtime_support import CommandHeader, DockingCommand, LayerName, ReconfigRuntimeEngine, SplitCommand, WaitCommand
+from docking.runtime_support import LayerName, ReconfigRuntimeEngine
+from runtime.command_bus import CommandHeader, DockingCommand, SplitCommand, WaitCommand
 
 
 def largest_train_size(edges: tuple[tuple[int, int], ...], vehicle_ids: tuple[int, ...]) -> int:
@@ -57,7 +58,14 @@ def run_demo():
         while submit_idx["i"] < len(schedule) and t >= schedule[submit_idx["i"]][0] - 1e-9:
             ts, typ, payload = schedule[submit_idx["i"]]
             cid = f"demo_{submit_idx['i']}"
-            hdr = CommandHeader(command_id=cid, issued_at=ts, valid_for_s=cfg.coordinator.command_ttl_s)
+            hdr = CommandHeader(
+                command_id=cid,
+                state_seq=int(rt.state_seq),
+                issued_at=float(ts),
+                deadline_at=float(ts + cfg.coordinator.command_ttl_s),
+                priority=5,
+                source="visualize_runtime_support",
+            )
             if typ == "dock":
                 f, l = payload
                 rt.submit_command(DockingCommand(header=hdr, follower_id=f, leader_id=l), now=t)
@@ -168,4 +176,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

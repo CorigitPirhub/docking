@@ -14,10 +14,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from docking.config import load_config
-from docking.runtime_support import (
+from docking.runtime_support import ReconfigRuntimeEngine
+from runtime.command_bus import (
     CommandHeader,
     DockingCommand,
-    ReconfigRuntimeEngine,
+    FeedbackStage,
+    FeedbackStatus,
     SplitCommand,
     WaitCommand,
 )
@@ -60,11 +62,19 @@ def run_episode(seed: int, duration_s: float = 30.0) -> EpisodeMetrics:
         cmd_id = f"ep{seed}_cmd{issued_ids}"
         issued_ids += 1
         ttl = float(cfg.coordinator.command_ttl_s)
+        hdr = CommandHeader(
+            command_id=cmd_id,
+            state_seq=int(engine.state_seq),
+            issued_at=float(t),
+            deadline_at=float(t + ttl),
+            priority=0,
+            source="validate_runtime_support",
+        )
         if choice < 0.6:
             follower = int(rng.integers(2, 7))
             leader = int(rng.integers(1, 7))
             cmd = DockingCommand(
-                header=CommandHeader(command_id=cmd_id, issued_at=t, valid_for_s=ttl),
+                header=hdr,
                 follower_id=follower,
                 leader_id=leader,
             )
@@ -73,7 +83,7 @@ def run_episode(seed: int, duration_s: float = 30.0) -> EpisodeMetrics:
             parent = int(rng.integers(1, 7))
             child = int(rng.integers(1, 7))
             cmd = SplitCommand(
-                header=CommandHeader(command_id=cmd_id, issued_at=t, valid_for_s=ttl),
+                header=hdr,
                 parent_id=parent,
                 child_id=child,
                 reason="random_split",
@@ -81,7 +91,7 @@ def run_episode(seed: int, duration_s: float = 30.0) -> EpisodeMetrics:
         else:
             v = int(rng.integers(1, 7))
             cmd = WaitCommand(
-                header=CommandHeader(command_id=cmd_id, issued_at=t, valid_for_s=ttl),
+                header=hdr,
                 vehicle_id=v,
                 duration_s=float(rng.uniform(0.2, 2.5)),
                 reason="random_wait",
@@ -111,14 +121,14 @@ def run_episode(seed: int, duration_s: float = 30.0) -> EpisodeMetrics:
     stats = engine.run(duration_s=duration_s, leader_remaining_fn=leader_remaining_fn, low_tick_hook=low_hook)
     inv_ok, _ = engine.check_invariants()
 
-    execute_acks = [a for a in engine.acks if a.stage == "execute"]
+    exec_fbs = [f for f in engine.feedbacks if f.stage == FeedbackStage.EXEC]
     ev = engine.events
     return EpisodeMetrics(
         seed=seed,
         invariant_ok=inv_ok,
         command_submit_total=submit_count,
-        command_execute_accept=sum(1 for a in execute_acks if a.accepted),
-        command_execute_reject=sum(1 for a in execute_acks if not a.accepted),
+        command_execute_accept=sum(1 for f in exec_fbs if f.status == FeedbackStatus.RUNNING),
+        command_execute_reject=sum(1 for f in exec_fbs if f.status == FeedbackStatus.REJECTED),
         dock_locked=sum(1 for e in ev if e.event_type.value == "DOCK_LOCKED"),
         split_done=sum(1 for e in ev if e.event_type.value == "SPLIT_DONE"),
         docking_aborted=sum(1 for e in ev if e.event_type.value == "DOCKING_ABORTED"),
@@ -186,4 +196,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

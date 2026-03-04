@@ -8,6 +8,8 @@ This document freezes the strategy-control interface for P1:
 2. Control/runtime layer executes accepted commands and emits lifecycle feedback.
 3. Both sides communicate through `runtime/command_bus.py`.
 
+Acceptance & regression entrypoints: `interface/acceptance_runbook.md`.
+
 ---
 
 ## 2. Strategy Input (Platform-Agnostic Snapshot)
@@ -135,3 +137,5 @@ Resource conflicts:
 Version: `v1.0`  
 Status: `Frozen at P1`
 
+Related:
+- Foundation cost-query API: `interface/foundation_cost_api.md`

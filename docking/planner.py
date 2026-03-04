@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .collision import CollisionEngine
+from .collision import CollisionEngine, bbox_distance, obstacle_polygon, polygon_bbox, polygons_intersect
 from .config import PlannerConfig, VehicleConfig
 from .kinematics import AckermannModel
 from .math_utils import angle_diff, clamp
@@ -46,8 +46,26 @@ class LocalPlanner:
         goal_yaw: float,
         obstacles: list[Obstacle],
         dynamic_others: list[VehicleState],
+        *,
+        force_goal_yaw: bool = False,
     ) -> PlanningResult:
-        others_pred = {o.vehicle_id: self._predict_other(o, self.planner_cfg.horizon_steps) for o in dynamic_others}
+        # Prepare static obstacles once per plan_step call to avoid re-allocating polygons/bboxes
+        # for every candidate and horizon step.
+        obs_prepared: list[tuple[np.ndarray, tuple[float, float, float, float]]] = []
+        for obs in obstacles:
+            poly = obstacle_polygon(obs)
+            obs_prepared.append((poly, polygon_bbox(poly)))
+
+        # Predict other vehicles and precompute their polygons/bboxes for fast SAT checks.
+        others_prepared: dict[int, list[tuple[list[np.ndarray], list[tuple[float, float, float, float]]]]] = {}
+        for other in dynamic_others:
+            pred = self._predict_other(other, self.planner_cfg.horizon_steps)
+            prep_steps: list[tuple[list[np.ndarray], list[tuple[float, float, float, float]]]] = []
+            for st in pred:
+                polys = self.collision_engine.vehicle_polygons(st)
+                boxes = [polygon_bbox(p) for p in polys]
+                prep_steps.append((polys, boxes))
+            others_prepared[int(other.vehicle_id)] = prep_steps
 
         best_cost = math.inf
         best_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
@@ -76,16 +94,36 @@ class LocalPlanner:
                 s = self.model.step(s, ControlCommand(accel=a, steer_rate=sr), self.dt)
                 traj.append(s)
 
-                others_now = [pred[min(k, len(pred) - 1)] for pred in others_pred.values()]
                 collide = False
-                for obs in obstacles:
-                    if self.collision_engine.collide_vehicle_obstacle(s, obs, include_clearance=False):
-                        collide = True
-                        break
-                if not collide:
-                    for o in others_now:
-                        if self.collision_engine.collide_vehicle_vehicle(s, o, include_clearance=False):
+                polys_s = self.collision_engine.vehicle_polygons(s)
+                boxes_s = [polygon_bbox(p) for p in polys_s]
+
+                # Static obstacle collision (exact polygon SAT, clearance excluded).
+                for obs_poly, obs_box in obs_prepared:
+                    for poly_s, box_s in zip(polys_s, boxes_s):
+                        if bbox_distance(box_s, obs_box) > 0.0:
+                            continue
+                        if polygons_intersect(poly_s, obs_poly):
                             collide = True
+                            break
+                    if collide:
+                        break
+
+                # Dynamic other vehicles collision (exact polygon SAT, clearance excluded).
+                if not collide and others_prepared:
+                    for prep_steps in others_prepared.values():
+                        idx = min(k, len(prep_steps) - 1)
+                        polys_o, boxes_o = prep_steps[idx]
+                        for poly_s, box_s in zip(polys_s, boxes_s):
+                            for poly_o, box_o in zip(polys_o, boxes_o):
+                                if bbox_distance(box_s, box_o) > 0.0:
+                                    continue
+                                if polygons_intersect(poly_s, poly_o):
+                                    collide = True
+                                    break
+                            if collide:
+                                break
+                        if collide:
                             break
                 if collide:
                     feasible = False
@@ -95,16 +133,25 @@ class LocalPlanner:
                 continue
 
             final = traj[-1]
-            dist_final = float(np.linalg.norm(final.xy() - goal_xy))
+            dist_final = float(math.hypot(float(goal_xy[0] - final.x), float(goal_xy[1] - final.y)))
             dist_cost = dist_final
             desired_heading = math.atan2(goal_xy[1] - final.y, goal_xy[0] - final.x)
-            if dist_final < 1.0:
+            if force_goal_yaw or dist_final < 1.0:
                 heading_ref = goal_yaw
             else:
                 heading_ref = desired_heading
             heading_cost = abs(angle_diff(heading_ref, final.yaw))
-            clearance = self.collision_engine.min_clearance_vehicle_obstacles(final, obstacles)
-            clearance_cost = 0.0 if clearance > 5.0 else 1.0 / max(clearance, 1e-3)
+            # Clearance proxy for cost (safety is enforced by explicit collision checks above).
+            # Use bbox distance to avoid expensive polygon-distance computations.
+            polys_f = self.collision_engine.vehicle_polygons(final)
+            boxes_f = [polygon_bbox(p) for p in polys_f]
+            clearance = math.inf
+            for _obs_poly, obs_box in obs_prepared:
+                for box_f in boxes_f:
+                    clearance = min(clearance, bbox_distance(box_f, obs_box))
+            if math.isinf(clearance):
+                clearance = 1e6
+            clearance_cost = 0.0 if clearance > 5.0 else 1.0 / max(float(clearance), 1e-3)
             smooth_cost = abs(a) + abs(sr)
             progress = max(0.0, dist_start - dist_final)
             stall_penalty = max(0.0, 0.45 - final.v)

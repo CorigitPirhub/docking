@@ -57,3 +57,27 @@ def test_bottleneck_scenarios_are_unavoidable_and_turning():
         assert vr.checks.get("baseline_route_exists", False), sub
         assert vr.checks.get("bottleneck_unavoidable", False), sub
         assert vr.checks.get("bottleneck_has_turn", False), sub
+
+
+def test_shared_path_passes_through_gate_openings_with_margin():
+    cfg = load_config()
+    gen = ScenarioGenerator(cfg)
+    margin = 0.5 * float(cfg.vehicle.car_width) + 0.02
+    # Sample inside wall thickness; keep symmetric around the gate center-x.
+    sample_dx = [0.0, 0.25, -0.25]
+    for sub, ov in [("B1", None), ("B2", {"B2_K": 2}), ("B3", None), ("C1", None), ("C2", None), ("C3", None)]:
+        case = gen.generate(sub, seed=321, overrides=ov)
+        gates = list(case.params.get("mandatory_gates", []))
+        assert gates, sub
+        path = case.path_xy
+        assert len(path) >= 3
+        xs = path[:, 0]
+        ys = path[:, 1]
+        for g in gates:
+            cx = float(g.get("cx", 0.0))
+            y0 = float(min(float(g.get("y0", 0.0)), float(g.get("y1", 0.0))))
+            y1 = float(max(float(g.get("y0", 0.0)), float(g.get("y1", 0.0))))
+            for dx in sample_dx:
+                xq = float(np.clip(cx + float(dx), float(xs[0]), float(xs[-1])))
+                yq = float(np.interp(xq, xs, ys))
+                assert (y0 + margin) <= yq <= (y1 - margin), (sub, cx, xq, y0, y1, yq)

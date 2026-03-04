@@ -34,12 +34,28 @@ class PathTrackingController:
         lookahead = self.control_cfg.pure_pursuit.lookahead_min + self.control_cfg.pure_pursuit.lookahead_gain * state.v
         acc = 0.0
         target_idx = nearest
-        while target_idx + 1 < len(path_xy) and acc < lookahead:
-            seg = np.linalg.norm(path_xy[target_idx + 1] - path_xy[target_idx])
-            acc += float(seg)
-            target_idx += 1
-
         tgt = path_xy[target_idx]
+        # Interpolate a continuous lookahead target along the polyline.
+        #
+        # Using only discrete waypoints can be unstable when the path is sparse
+        # (e.g., A* join routes compressed to only 2-3 points). Then pure-pursuit
+        # tends to aim at a far endpoint, producing very small steering angles
+        # and long corridor rejoin times in P6 scattered starts.
+        while target_idx + 1 < len(path_xy) and acc < lookahead:
+            p0 = path_xy[target_idx]
+            p1 = path_xy[target_idx + 1]
+            seg = float(np.linalg.norm(p1 - p0))
+            if seg <= 1e-9:
+                target_idx += 1
+                tgt = path_xy[target_idx]
+                continue
+            if acc + seg >= lookahead:
+                r = float((lookahead - acc) / seg)
+                tgt = (1.0 - r) * p0 + r * p1
+                break
+            acc += seg
+            target_idx += 1
+            tgt = path_xy[target_idx]
         vec = tgt - state.xy()
         alpha = angle_diff(math.atan2(vec[1], vec[0]), state.yaw)
         ld = max(np.linalg.norm(vec), 1e-3)
@@ -104,7 +120,9 @@ class PathTrackingController:
         # Point attractor with damping on heading.
         k_yaw = 1.3
         k_dist = 0.4
-        delta_ref = yaw_err + math.atan2(k_dist * dist, max(state.v, 0.3))
+        sign = 1.0 if yaw_err > 0.0 else (-1.0 if yaw_err < 0.0 else 0.0)
+        v_term = max(abs(state.v), 0.3)
+        delta_ref = k_yaw * yaw_err + sign * math.atan2(k_dist * dist, v_term)
         dmax = math.radians(self.vehicle_cfg.max_steer_deg)
         delta_ref = clamp(delta_ref, -dmax, dmax)
 

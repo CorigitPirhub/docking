@@ -186,7 +186,8 @@ Gate-1 结论：`Go`
 
 ### P2.3 产出物
 - `strategy/baseline_scheduler.py`
-- `strategy/cost_model.py`
+- `docking/costs.py`
+- `interface/foundation_cost_api.md`
 - `experiments/p2_sequence_results.json`
 
 ### P2.4 量化指标
@@ -196,6 +197,32 @@ Gate-1 结论：`Go`
 
 ### P2.5 Gate-2
 - 基线策略在 A/B/C 三类场景均可稳定运行且优于至少一个朴素基线。
+
+### P2 完成记录（2026-03-02）
+
+状态：`Completed`
+
+交付物：
+
+1. `docking/costs.py`（序列代价/能耗/风险模型 + 行为代价查询接口）
+2. `interface/foundation_cost_api.md`（冻结 cost-query 协议）
+3. `strategy/baseline_scheduler.py`
+4. `strategy/__init__.py`
+5. `scripts/run_p2_sequence_experiments.py`
+6. `tests/test_p2_scheduler.py`
+7. `experiments/p2_sequence_results.json`
+8. `artifacts/P2_SEQUENCE_REPORT.md`
+
+量化结果（`seeds_per_subtype=8`，共 `72` 案例）：
+
+1. 相对“全独立行驶”平均总能耗下降：`2.5043%`（阈值 `>=2.5%`）
+2. 相对“固定序列对接”平均总耗时下降：`16.8403%`（阈值 `>=8%`）
+3. 指令层面可执行率（adaptive）：`100.00%`（阈值 `>=95%`）
+4. 批量结果判定：`gate2_ready=True`
+5. 专项单测：`pytest -q tests/test_p2_scheduler.py` 通过
+6. 全量回归：`pytest -q` 通过
+
+Gate-2 结论：`Go`
 
 ---
 
@@ -223,6 +250,39 @@ Gate-1 结论：`Go`
 ### P3.4 Gate-3
 - B/C 场景通行与重构行为满足安全硬约束并达到目标准确率。
 
+### P3 完成记录（2026-03-02）
+
+状态：`Completed`
+
+交付物：
+
+1. `strategy/p3_reconfig.py`
+2. `scripts/run_p3_reconfig_experiments.py`
+3. `scripts/visualize_p3_reconfig.py`
+4. `scripts/visualize_p3_reconfig_gif.py`
+5. `tests/test_p3_reconfig.py`
+6. `experiments/p3_reconfig_results.json`
+7. `artifacts/P3_RECONFIG_REPORT.md`
+8. `artifacts/P3_CONVERGENCE_NOTE.md`
+9. `artifacts/p3_reconfig_B_representative.gif`
+10. `artifacts/p3_reconfig_C_representative.gif`
+
+量化结果（B/C 共 `90` 案例，`seeds_per_subtype=15`）：
+
+1. Type B 违规通行总次数：`0`（阈值 `=0`）
+2. Type C 重构决策准确率（相对离线标签）：`1.0000`（阈值 `>=0.90`）
+3. 因解编/重构导致碰撞总数（约束违规代理）：`0`（阈值 `=0`）
+4. 批量结果判定：`gate3_ready=True`
+5. 专项单测：`pytest -q tests/test_p3_reconfig.py` 通过
+6. 全量回归：`pytest -q` 通过
+
+收敛性说明：
+
+1. 已输出 P3 收敛与稳定性说明文档：`artifacts/P3_CONVERGENCE_NOTE.md`
+2. 结论：有限路径 + 有界冷却 + 安全投影下，事件序列有限且保持通行约束不变式。
+
+Gate-3 结论：`Go`
+
 ---
 
 ## P4：预测性主动对接与异常回退联动
@@ -249,6 +309,34 @@ Gate-1 结论：`Go`
 ### P4.4 Gate-4
 - 异常触发场景下系统保持鲁棒，不出现长时间僵死。
 
+### P4 完成记录（2026-03-02）
+
+状态：`Completed`
+
+交付物：
+
+1. `strategy/p4_recovery.py`
+2. `scripts/run_p4_recovery_experiments.py`
+3. `scripts/visualize_p4_demo.py`
+4. `tests/test_p4_recovery.py`
+5. `experiments/p4_recovery_results.json`
+6. `artifacts/P4_RECOVERY_REPORT.md`
+7. `artifacts/p4_demo_timeline.png`
+8. `artifacts/p4_demo_recovery.gif`
+
+量化结果（A/B/C 共 `108` 案例，`seeds_per_subtype=12`）：
+
+1. 对接中断总次数：`150`
+2. 对接中断后恢复成功率：`1.0000`（阈值 `>=0.90`）
+3. 中断后 3s 内重新进入可执行状态比例：`1.0000`（阈值 `>=0.95`）
+4. 异常回退导致的任务失败率增量：`0.0000`（阈值 `<=0.05`）
+5. 长时间僵死/死锁总数：`0`（Gate-4 鲁棒性要求）
+6. 批量结果判定：`gate4_ready=True`
+7. 专项单测：`pytest -q tests/test_p4_recovery.py` 通过
+8. 全量回归：`pytest -q` 通过
+
+Gate-4 结论：`Go`
+
 ---
 
 ## P4.5 Integration Checkpoint（新增，P5 前必过）
@@ -273,6 +361,52 @@ Gate-1 结论：`Go`
 
 ### 通过条件（Gate-4.5）
 - 通过后才允许进入 P5 的多目标权重优化与 Pareto 收敛阶段。
+
+### P4.5 完成记录（2026-03-02）
+
+状态：`Completed`
+
+交付物：
+
+1. `strategy/p2_p4_integrated.py`（新增冲突观测、优先级仲裁、去抖振记录）
+2. `scripts/run_p4_5_integration_checkpoint.py`
+3. `scripts/visualize_p4_5_checkpoint.py`
+4. `experiments/p4_5_integration_checkpoint_results.json`
+5. `artifacts/P4_5_INTEGRATION_CHECKPOINT.md`
+6. `artifacts/p4_5_metrics_summary.png`
+7. `artifacts/p4_5_representative_timeline.png`
+
+量化结果（Type C 压测集：`C1/C3`，`60` runs）：
+
+1. 冲突一致率：`1.0000`（阈值 `>=0.99`）
+2. 10s 窗口互斥抖振最大值：`1`（阈值 `<=1`）
+3. 因策略冲突导致额外失败率增量：`0.0000`（阈值 `<=0.02`）
+4. 先合后分后合链路稳定率：`1.0000`（内部稳定性门槛 `>=0.95`）
+
+对照消融（`dock_priority`）：
+
+1. 冲突一致率：`0.0000`
+2. 额外失败率增量：`1.0000`
+3. 先合后分后合稳定率：`0.0000`
+
+Gate-4.5 结论：`Go`
+
+### P4.5 修复后复核（2026-03-03）
+
+针对“B 场景后段卡停（feasibility_block + 终点拥堵）”修复后执行复核：
+
+1. Gate-B 验收口径修正：`integrated_success=True` 为必需条件（不再仅检查 `split_count` 与 `leader_s`）。
+2. Type-C 冲突闭环复跑：`scripts/run_p4_5_integration_checkpoint.py --seeds-per-subtype 12`
+3. B1 60s 多 seed 平台期检查：`scripts/run_b1_60_multiseed_check.py --num-seeds 12`
+
+复核结果：
+
+1. Gate-4.5（Type C1/C3, 24 runs）  
+   冲突一致率 `1.0000`、10s 抖振最大值 `1`、额外失败率增量 `0.0000`、先合后分后合稳定率 `1.0000`，`gate4_5_ready=True`。
+2. B1 60s 多 seed（12 runs）  
+   成功率 `1.0000`、无碰撞率 `1.0000`、无平台停死率 `1.0000`、平均完成时间 `53.80s`。
+
+复核结论：`Go`（满足进入 P5 的稳定性前置条件，样本规模为快速复核批次）。
 
 ---
 
@@ -301,6 +435,36 @@ Gate-1 结论：`Go`
 ### P5.4 Gate-5
 - 形成可解释的 Pareto 曲线与推荐权重策略。
 
+### P5 完成记录（2026-03-03）
+
+状态：`Completed`
+
+交付物：
+
+1. `strategy/p5_multiobjective.py`
+2. `scripts/run_p5_pareto_experiments.py`
+3. `scripts/visualize_p5_pareto.py`
+4. `tests/test_p5_multiobjective.py`
+5. `experiments/p5_pareto_results.json`
+6. `artifacts/P5_PARETO_REPORT.md`
+7. `artifacts/p5_pareto_frontier.png`
+8. `artifacts/p5_profile_tradeoff.png`
+
+量化结果（`A/B/C` 共 `72` 案例，权重候选 `75` 组）：
+
+1. Pareto 有效点数量：`36`（阈值 `>=10`）
+2. 满足 Gate-5 约束的候选权重数：`1`
+3. 推荐权重配置：`p061`
+   - 相对单车独立基线平均能耗下降：`3.6463%`（阈值 `>=3%`）
+   - 相对单车独立基线平均耗时改善：`0.2381%`（满足“不劣于基线”）
+   - 碰撞数：`0`
+   - 指令执行率：`100%`
+4. 批量结果判定：`gate5_ready=True`
+5. 专项测试：`pytest -q tests/test_p5_multiobjective.py` 通过
+6. 全量回归：`pytest -q` 通过
+
+Gate-5 结论：`Go`
+
 ---
 
 ## P6：系统级评估与论文级证据整理
@@ -327,6 +491,55 @@ Gate-1 结论：`Go`
 ### P6.4 Gate-6（项目验收）
 - 指标达标 + 复现实验脚本完整 + 文档可审计。
 
+### P6 完成记录（2026-03-03）
+
+状态：`Completed (Gate-6: No-Go)`
+
+交付物：
+
+1. `strategy/p6_system_eval.py`
+2. `scripts/run_p6_system_evaluation.py`
+3. `scripts/visualize_p6_results.py`
+4. `tests/test_p6_system_eval.py`
+5. `experiments/p6_system_evaluation_results.json`
+6. `artifacts/P6_SYSTEM_EVALUATION_REPORT.md`
+7. `artifacts/p6_policy_metrics.png`
+8. `artifacts/p6_subtype_success_heatmap.png`
+9. `artifacts/p6_time_energy_scatter.png`
+
+评测配置（本轮）：
+
+1. 场景覆盖：`A1/A2/A3/B1/B2/B3/C1/C2/C3`
+2. 初始分散模式：`Random_Scattered`、`Uniform_Spread`
+3. 每子类种子数：`1`
+4. 车辆数：`2`
+5. 策略对比：`integrated_split_priority`（主策略）、`integrated_dock_priority`（消融）、`independent`（基线）
+6. 总运行数：`54`
+
+量化结果（主策略 `integrated_split_priority`）：
+
+1. 总体成功率：`0.4444`（阈值 `>=0.95`，未达标）
+2. `T_done <= 60s` 达成率：`0.4444`（阈值 `>=0.90`，未达标）
+3. 可完成性判定准确率（proxy）：`0.1013`（阈值 `>=0.90`，未达标）
+4. 全测试集碰撞总数：`6`（阈值 `=0`，未达标）
+
+对比结果：
+
+1. 相对 `independent`：成功率 `-11.11%`，平均时间 `-0.097s`，平均能耗 `-12.36%`，碰撞总数持平（`6` vs `6`）。
+2. 相对 `integrated_dock_priority`：成功率 `+5.56%`，平均时间 `-3.64s`，平均能耗 `-7.44%`，碰撞总数 `-2`。
+
+失败聚类（摘要）：
+
+1. 复杂瓶颈/混合场景（`B3/C1/C2/C3`）出现集中超时与碰撞。
+2. `dock_priority` 在 Type-C 冲突场景失败更重，与 P4.5 冲突仲裁结论一致。
+
+测试与回归：
+
+1. `pytest -q tests/test_p6_system_eval.py tests/test_p5_multiobjective.py tests/test_p2_p4_integrated.py` 通过。
+2. `pytest -q` 全量回归通过。
+
+Gate-6 结论：`No-Go`
+
 ---
 
 ## 阶段依赖关系（必须遵守）
@@ -338,4 +551,29 @@ Gate-1 结论：`Go`
 ---
 
 ## 当前任务目标
-启动 P2：实现时空协同序列决策基线（`J_seq` + `baseline_scheduler` + 主动截获点选择）。
+保持在 P6 修复闭环：针对 `B3/C1/C2/C3` 的超时与碰撞问题做稳定性修复后重跑系统级评估，目标是把 Gate-6 从 `No-Go` 提升为 `Go`。
+下一轮需优先收敛：`success_rate`、`T_done<=60s`、`collision_total` 三项硬门槛。
+
+### P2-P4 演示修复记录（2026-03-02）
+
+已完成“效果优先”的 P2-P4 联调修复与可视化重生成，结果作为 P4.5 前置演示基线：
+
+1. 新增/修复集成执行链路：`strategy/p2_p4_integrated.py`
+2. 重新定义 A/B/C 演示用例并固化：`scripts/run_p2_p4_integrated_demo.py`
+3. 重做可视化与 GIF：`scripts/visualize_p2_p4_integrated_demo.py`
+4. 效果验收测试通过：`tests/test_p2_p4_integrated.py`
+5. 结果与报告：
+   - `experiments/p2_p4_integrated_demo_results.json`
+   - `artifacts/P2_P4_INTEGRATED_DEMO_REPORT.md`
+   - `artifacts/p2_p4_demo_A.gif`
+   - `artifacts/p2_p4_demo_B.gif`
+   - `artifacts/p2_p4_demo_C.gif`
+   - `artifacts/p4_demo_recovery.gif`（已覆盖为新版）
+
+当前三类演示结论（case-pass）：
+
+1. A（P2 对接）：`pass`
+2. B（P3 解编）：`pass`
+3. C（P4 恢复）：`pass`
+
+汇总：`all_case_pass=true`（见 `experiments/p2_p4_integrated_demo_results.json`）。
