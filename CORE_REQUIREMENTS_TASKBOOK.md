@@ -10,6 +10,202 @@
 
 ---
 
+## P-1（最高优先级，先于 P0）：基础支撑对接能力扎实化（随机障碍 + 两阶段对接闭环）
+
+> 目的：在进入任何“策略层/调度层”研究前，先把**基础支撑层的对接能力**打磨到“可在随机障碍环境中稳定闭环”的水平，形成可复用的 Docking Skill/接口与可视化证据。  
+> 说明：本阶段只关注“对接功能本身”可用、可批量评测、可复现；不做多目标权重优化、不做上层序列决策。
+
+### P-1.1 Co-BCFD Docking Skill（需要广泛搜集相关论文，必须具备创新性实现）
+> **设计稿/论文叙事**：以 `DOCK.md` 为准（P-1.2/P-1.3 的实验暴露问题后，必须反向更新 `DOCK.md`，保持“设计-实现-实验”一致）。
+
+对接被视为一个可复用闭环技能（Docking Skill）。注意：“全局趋近 + 视觉伺服”只是技能内部手段；P-1.1 的创新性要求在于把**可达性/可见性/安全/回退/协同配合**统一成一个浑然天成的结构，而不是工程拼接。要求架构至少包含：
+1. **协同 Staging（Leader 可动，内部封装动作）**：被对接车（Leader）不要求原地等待；当当前位置导致“几何不可达/遮挡严重/风险高/代价大”时，Docking Skill 内部需选择 docking-friendly staging pose，并驱动 Leader 做短程位姿调整；Follower 同步去到等待/预对接位姿。
+2. **置信一致融合（Belief-Consistent Fusion Gate）**：GNSS 与视觉相对位姿在过渡带内做平滑融合，融合权重需同时由“距离调度 + 一致性门控（如 NIS/卡方门限）”决定，避免异常视觉污染与指令跳变。
+3. **Capture-Funnel + Contact Gate（捕获域漏斗 + 接触门控）**：显式刻画 Ackermann 近场不可原地修姿导致的“捕获域”问题；在进入接触带前必须满足必要条件，否则触发 backoff/微机动，避免残差死锁。
+4. **近场微机动规划器（Parking-like Planner / BR-SMPC）**：支持“倒车-对齐-再前进”的非凸机动（MPPI/CEM/HybridA* 等均可），用于把系统状态拉入捕获域并推进到锁定域。
+5. **异常回退（Fallback/Recovery）**：视觉丢失、FOV 脱离、局部不可行时，自动回退到全局/重规划；必要时重新 staging。
+6. **统一安全过滤（Safety Projection）**：对任意名义控制输出施加碰撞/净空/执行器约束投影，保证零碰撞与最小净空要求。
+
+### P-1.1B DockBench 场景标准与数据集冻结（P-1.2 前置阶段）
+> **规范书**：`DOCK_SCENARIO_STANDARD.md`
+
+在进入 P-1.2 的 Stage-1/Stage-2 之前，必须先冻结 docking 专用场景标准与固定数据集 `DockBench-v1`。该阶段不是“补充文档”，而是正式前置任务，后续所有两车实验必须基于该标准执行。
+
+1. **建立两车 docking 的四层场景标准**：采用 `abstract -> logical -> concrete -> audit` 四层结构，避免“随机地图 + 人工挑 seed”。
+2. **冻结场景 family 与 difficulty 体系**：至少固定 `CF / SC / FC / EC` 四类 family，并引入 `L1 / L2 / L3` 难度等级；所有 P-1.2 报告必须按 family 口径汇总。
+3. **冻结固定数据集与 split**：正式 benchmark 使用固定 concrete scene 数据集，不得每次重新随机采样 test scenes；推荐 `DockBench-v1 = 72` 个 concrete scenes，采用 `tuning / test / challenge` 三段 split。
+4. **冻结统一 JSON schema 与 manifest**：每个场景必须包含 `scene_id / split / family / difficulty / 车辆初始状态 / 障碍物几何与 role / descriptors / quality / audit` 等字段，并产出 manifest 与 split 清单。
+5. **障碍物分布采用“角色化拓扑”而非仅按数量计数**：障碍应区分 `screen / channel / dock_zone / background / hybrid` 等角色，并按 `corridor / dock-zone / background` 三个任务相关区域统计特征。
+6. **建立场景质量评估器（Scenario Quality Evaluator）**：至少包含 `validity`、`label fidelity`、`diversity`、`balance` 四类指标；同时增加闭环审计，确认 family 标签与真实基础支撑执行一致。
+7. **建立 family admission 规则**：
+   - `CF / SC / FC`：至少 1 个强传统基线在对应 `tuning` cell 上必须具备稳定非零成功率；
+   - `EC`：必须体现 cooperative staging 带来的可解域扩展，不能只是“无解场景”。
+8. **建立阶段耦合关系**：P-1.2 Stage-1 的代表场景、Stage-2 的批量对比、消融实验与 challenge 复现，全部必须从 frozen dataset 中读取，不允许临时手工替换正式 test scene。
+
+**P-1.1B 验收要求**
+- 产出正式规范书：`DOCK_SCENARIO_STANDARD.md`
+- 产出固定 split 与 manifest 文档/文件名规范
+- 给出每个 family 的 descriptor 阈值或 admission 条件
+- 给出场景质量评估器定义与打分/过滤逻辑
+- 明确 P-1.2 Stage-1/Stage-2 如何使用并验证该标准
+
+### P-1.2 任务阶段（五步走，含 Stage-0 前置）
+**统一对比要求（每个 Stage 必须执行）**
+- 每个 Stage 都必须与若干“传统方法（Traditional Baselines）”做对比评测，而不是只展示本方法单跑结果；且对比集不能只包含明显偏弱、理论上难以完成任务的 baseline。
+- 所有方法必须在**同一场景、同一初态、同一时间上限、同一碰撞/对接判定、同一执行器约束**下比较；baseline 调参必须在独立 held-out seed 集上完成，不得在正式测试 seed 上反复调参后报告。
+- “传统方法”不再只允许弱基线，必须构成**分层基线池**（推荐依据：视觉伺服经典文献、非完整约束搜索规划、层级停车/泊车规划、采样/优化控制）：  
+  1. **弱基线（Sanity Baselines，保留）**：  
+     - **T-GlobalOnly**：仅使用全局定位/共享地图的截获与跟踪（不使用视觉伺服或仅作观测不入环）。  
+     - **T-HardSwitch**：在阈值距离处做硬切换的两阶段方法（无融合/无平滑）。  
+     - **T-GeoGoToPoint / PurePursuit**：基于几何目标点的纯跟踪/纯追踪（弱规划或无规划）。  
+  2. **强传统基线（Strong Classical Baselines，至少实现其中 2 个）**：  
+     - **T-HybridAStar-PBVS / T-Lattice-PBVS**：采用 Hybrid A* 或 State Lattice 生成满足 Ackermann 约束的预对接/泊车式路径，近场使用 PBVS/IBVS/同类经典视觉伺服，不使用 cooperative staging、belief-consistent gate、capture-funnel。  
+     - **T-HybridAStar-NMPC / T-Lattice-MPPI**：采用搜索规划给出 warm start，再使用 NMPC/MPPI/CEM 等传统优化型局部控制完成近场机动，不使用 cooperative staging 或 belief-consistent gate。  
+     - **T-Parking-Hierarchical**：采用“搜索规划 + 轨迹优化/跟踪”层级式泊车框架，把对接视作动态预对接位姿逼近问题，允许倒车和多次机动，但不使用本工作的 cooperative staging / capture-funnel 机制。  
+  3. **能力匹配基线（Capability-Matched Baselines，至少实现 1 个）**：  
+     - **T-Coop-HardSwitch**：允许 Leader 位姿调整，但感知切换采用硬切换/距离加权，不使用 NIS 一致性门控。  
+     - **T-Coop-DistBlend**：允许 cooperative staging，但只使用距离调度融合，不使用 belief-consistent 一致性检验与 capture-funnel/contact gate。  
+  （允许替换/增删，但 Stage-1/2 最终报告中**至少保留 4 个 baseline**，其中**至少 2 个强传统基线**、**至少 1 个能力匹配基线**。）
+- 对比集必须按**场景机理分层**组织，而不是只在“只有本方法可能成功”的场景上比较：  
+  - **共同可解子集（Common-Feasible / CF）**：不依赖 leader relocation 才能成立，至少 1 个强传统基线在该子集上应有稳定非零成功率；若所有强基线在当前测试集上均为 0，则必须补充/调整场景直到该子集成立。  
+  - **切换/遮挡关键子集（Switching-Critical / SC）**：用于检验视觉融合、FOV 丢失回退、遮挡恢复。  
+  - **捕获域关键子集（Funnel-Critical / FC）**：用于检验 capture-funnel、近场 backoff、micro-maneuver。  
+  - **能力扩展子集（Extension-Critical / EC）**：需要 leader relocation、明显 staging gap 或显著绕障后才能完成，用于证明本方法扩展了可解域。  
+  Stage-1/2 报告必须**同时给出 Overall + CF + SC + FC + EC** 的 family 结果口径；为兼容旧结果，可附 `Common-Feasible + Extension-Critical` 汇总口径。
+- 对比指标需要冻结并在阶段报告中写清楚定义与计算方法；至少必须包含：  
+  - **对接完成时间**（成功用例 `T_done` 的分布/均值/分位数）  
+  - **规划/轨迹代价**（局部规划 cost、累计控制 effort、曲率/平滑惩罚、任务级总代价等，需统一口径）  
+  - **碰撞率/碰撞次数**（含静态障碍与车车碰撞）  
+  - **对接任务成功率**（满足对接完成判定 + hold）  
+  - **最小净空**、**回退/重规划次数**、**视觉丢失/FOV 丢失次数**、**leader relocation 距离/时间**、**follower detour ratio**、**指令平滑度**（加加速度/转向变化率）
+- 批量结果必须给出**配对统计显著性**或**置信区间**：建议至少对 `T_done`、trajectory cost、success rate 使用 bootstrap 95% CI；对共同可解子集上的成对时间/代价比较，建议补充 Wilcoxon signed-rank 或同等级非参数检验。
+- 每个 Stage 的可视化需包含“本方法 vs 传统方法”的对照（至少 1 个代表用例），并输出批量汇总图表（Stage-2/Stage-4 必须）。
+
+**统一实验协议（Stage-1/2 必须执行，Stage-3/4 继承）**
+- 场景集必须拆分为 **tuning / test** 两部分：`tuning` 只用于 baseline 与消融超参冻结，`test` 只用于最终报告；若 Stage-2 数据量允许，建议再保留 `challenge` 子集承载失败复现与极端案例，不参与主指标调参。
+- 每个 `test` 场景都必须保存**场景清单（seed、障碍参数、初始位姿、子集标签）**与**方法配对运行结果**，确保所有方法在同一实例上逐一执行，禁止“方法 A 跑一批场景、方法 B 跑另一批场景”的非配对比较。
+- 对比实验需要同时产出 **主结果表 + 失败归因表**：失败原因至少区分 `collision`、`timeout`、`geometric_deadlock`、`fov_loss_unrecovered`、`lock_condition_not_met`，避免把所有失败都记为单一 `failed`。
+- 基线准入需要分两步：先在 `Common-Feasible` held-out 子集上验证是否具备非零成功率，再进入正式 `test`；若某强传统基线经合理调参后仍完全失效，可保留为 sanity baseline，但不得作为“主要传统对比对象”支撑结论。
+- Stage-1/2 报告的主表建议固定为：`Overall`、`Family Breakdown (CF/SC/FC/EC)`、`Compatibility (Common-Feasible/Extension-Critical)`、`Ablation` 四张核心表，并附配对散点/箱线图与代表失败链路回放。
+
+**统一消融要求（Stage-1/2 必须执行，Stage-3/4 继承）**
+- 必须围绕 `DOCK.md` 中声明的关键模块做消融，而不是只做“换超参”实验。Full model 记为 **A-Full**，至少应包含以下单模块消融：  
+  - **A-NoStage**：去掉 cooperative staging，Leader 固定或只允许极小被动配合。  
+  - **A-NoBeliefGate**：去掉 NIS/一致性门控，仅保留距离调度融合；如有必要再补 **A-HardSwitch** 作为更强消融。  
+  - **A-NoFunnelGate**：去掉 capture-funnel / contact gate / backoff 进入条件。  
+  - **A-NoMicroManeuver**：去掉近场 parking-like 微机动规划，仅保留前向跟踪/几何伺服。  
+  - **A-NoFallback**：关闭视觉丢失回退、重规划、re-staging。  
+  - **A-NoSafetyProj**：去掉统一 safety projection（如直接运行名义控制，或仅保留软惩罚）。
+- 除单模块消融外，至少增加 **2 个机制耦合消融**，优先推荐：  
+  - **A-NoStage-NoMicroManeuver**：检验“远场位姿准备 + 近场非凸机动”联合作用；  
+  - **A-NoBeliefGate-NoFunnelGate**：检验“感知一致性 + 近场捕获域”联合作用。
+- 消融必须与场景机理对齐，而不是所有模块在所有场景上混着跑：  
+  - `A-NoStage` 重点在 `Extension-Critical` 子集；  
+  - `A-NoBeliefGate / A-HardSwitch / A-NoFallback` 重点在 `Occlusion / Switching-Critical` 子集；  
+  - `A-NoFunnelGate / A-NoMicroManeuver` 重点在近场窄净空/大初始航向误差子集；  
+  - `A-NoSafetyProj` 重点在窄净空和障碍贴边子集。
+- Stage-1 需要在代表性场景上完成**完整消融矩阵**；Stage-2 至少对上述单模块消融中的 **4 个关键消融**做批量统计，并报告 `Δsuccess_rate / Δcollision_rate / ΔT_done / Δcost / Δfallback_count`。
+- 若某个模块消融后没有带来可观差异，不得直接删除该模块结论；必须检查：场景是否打到该模块的作用区间、判定口径是否足够敏感、baseline/ablation 是否过度共享实现，必要时需要补设计场景再验证。
+
+0. **Stage-0：场景标准化与数据集冻结（由 P-1.1B 定义，P-1.2 使用并验证）**
+   - 冻结 `DockBench-v1` 的 family、difficulty、split、scene id、JSON schema 与 quality evaluator。
+   - Stage-1/Stage-2 的正式场景必须从 frozen dataset 中选取，不允许用临时随机 seed 替代正式 test split。
+   - Stage-0 的正确性由 Stage-1/Stage-2 共同反证：若出现“family 标签与真实执行机理不一致”“Common-Feasible 强基线全灭”“Extension-Critical 本质无解”等情况，优先回到 Stage-0 修正数据集而不是先改结论。
+
+1. **Stage-1：两车单场景对接（单次验证）**
+   - 创建 1 个带若干随机障碍的场景；两辆车在场景中**随机分布**（但初始位置不应太接近）。
+   - 运行闭环对接任务：后车对接前车，满足对接完成判定（位置/航向/速度差 + hold）。
+   - 与传统方法对比：在同一场景、同一初态下跑通本方法与传统基线，输出对接时间/代价/是否碰撞/是否成功的对比表。
+   - Stage-1 的“代表场景”必须从 frozen dataset 中选择：除主展示场景外，还必须补 1 个**共同可解对照场景**（至少 1 个强传统基线成功）；当验证 fusion/fallback 时，应额外从 `SC` family 取机制场景；当验证 funnel/micro-maneuver 时，应额外从 `FC` family 取机制场景。
+   - 执行完整消融矩阵：至少完成 `A-Full + 6 个单模块消融 + 2 个耦合消融`，并给出模块-失败模式对应解释。
+   - 交付可视化：GIF/MP4（轨迹、FOV、阶段切换权重、对接状态、安全边界等），并提供“本方法 vs 传统方法”的对照回放，以及至少 1 组“Full vs Ablation”的对照回放。
+
+2. **Stage-2：两车多场景批量验证（成功率）**
+   - 生成多组不同的随机场景（障碍、初始分散模式等）；**每个场景的初始车位可以固定**（不要求每次运行都重采样）。
+   - 批量跑对接闭环，统计成功率、平均耗时、碰撞数、最小净空、视觉丢失/回退次数、指令平滑指标。
+   - 与传统方法对比：对 frozen `test` split 中的每个场景同步跑本方法与传统基线，输出 per-method 的成功率、碰撞率、时间/代价分布与显著失败聚类；并分别给出 `Overall / CF / SC / FC / EC` 与 `Common-Feasible / Extension-Critical` 两套统计口径（前者用于新标准，后者兼容现有结论）。
+   - 强传统基线必须在 `Common-Feasible` 子集上体现真实竞争力；若该子集上所有强传统基线仍接近 0 成功率，则 Stage-2 报告视为“对比集设计不合格”，需补充/重构场景集后重跑。
+   - 批量消融：至少对 `A-NoStage`、`A-NoBeliefGate`、`A-NoFunnelGate`、`A-NoMicroManeuver` 做多 seed 统计；其余模块可在机制子集上补跑。
+   - 交付可视化：每个场景至少 1 个回放 GIF（含本方法 vs 传统方法对照）+ 汇总图表（success heatmap、耗时/代价分布、失败聚类、方法对比柱状/雷达图、ablation bar/heatmap 等）。
+
+3. **Stage-3：多车单场景对接（单次验证）**
+   - 创建 1 个带随机障碍的场景；多辆车自由分布（避免初始过近）。
+   - 支持多车对接成列车/链式结构（可顺序对接，也可并发对接的子集，具体由基础支撑内部协调）。
+   - 与传统方法对比：在同一场景、同一初态下对比至少 2 个传统基线（可为“逐车贪心对接 + 纯跟踪”等），输出系统级成功/碰撞/时间/代价对比。
+   - 交付可视化：展示拓扑演化（edges/pending_docks）、对接过程与安全边界，并提供“本方法 vs 传统方法”的代表对照回放。
+
+4. **Stage-4：多车多场景批量验证（成功率）**
+   - 多车场景批量生成与评测，输出系统级成功率与失败分析。
+   - 与传统方法对比：批量对比本方法与传统基线的成功率、碰撞率、时间/代价分布，给出失败原因对照与消融结论。
+   - 交付可视化：每子类/模式的成功率热力图 + 关键失败案例 GIF 包 + 传统方法对比汇总图（论文级可复用）。
+
+### P-1.3 量化指标（建议门槛，可随平台能力微调）
+- Stage-1：单场景两车对接 **成功 1/1**，碰撞 **0**，最小净空 \(\ge 0.1m\)。
+- Stage-2：两车批量成功率 \(\ge 95\%\)，碰撞 **0**；对接平均耗时 \(\le 15s\)（或给出合理解释与曲线）。
+- Stage-3：单场景多车对接 **成功 1/1**，碰撞 **0**，拓扑合法。
+- Stage-4：多车批量成功率 \(\ge 90\%\)（初期可放宽但需逐步收敛到 \(\ge 95\%\)），碰撞 **0**。
+- **共同可解子集约束**：Stage-1/2 报告必须包含至少 1 组/1 个子集，使得至少 1 个强传统基线具有稳定非零成功率；Stage-2 建议该强基线在 `Common-Feasible` 子集上的成功率 \(\ge 60\%\)，否则说明对比场景设计不充分。
+- **竞争性要求**：在 `Common-Feasible` 子集上，本方法相对“最优强传统基线”应至少满足以下之一：  
+  1. 成功率非劣（差距不超过 5 个百分点）且平均 `T_done` 或平均 trajectory cost 至少改善 5%；  
+  2. 成功率提升至少 10 个百分点。  
+  若不满足，必须在报告中明确说明哪一项设计没有形成增益，并回到 `DOCK.md` 修正。
+- **能力扩展要求**：在 `Extension-Critical` 子集上，本方法相对“最优强传统基线”的成功率提升建议 \(\ge 15\) 个百分点；若未达到，需要说明 cooperative staging / capture-funnel 的真实收益是否被实现掩盖。
+- **消融有效性要求**：对每个关键模块，其对应机制子集上移除该模块后，应在 `success_rate / collision_rate / T_done / cost / fallback_count` 至少一项上出现可解释且可复现的显著退化；若没有，视为该模块尚未被实验充分验证。
+
+### P-1.4 Gate（进入 P0 的前置条件）
+- 形成可复现脚本：`生成场景 -> 跑闭环 -> 输出指标 -> 导出可视化` 一键完成。
+- Stage-2/Stage-4 的批量评测能稳定复现（同 seed 同结果），并能定位失败原因（日志/事件/最小复现实例）。
+
+### P-1.5 预期交付物（可在实现时细化命名）
+- 场景标准规范书（DockBench family / difficulty / split / quality evaluator）
+- 固定数据集 manifest 与 split 清单（2-car 为主，可扩展到 N-car）
+- 场景生成脚本（2-car / N-car）
+- 批量评测脚本（2-car / N-car）
+- 可视化脚本（单案回放 GIF + 批量汇总图）
+- 对接闭环核心实现（Docking Skill）
+- 基线规范文档（baseline family、超参、适用范围、失败模式、调参 seed 划分）
+- 消融实验脚本与汇总报告（单模块 + 耦合模块）
+- 共同可解/遮挡关键/能力扩展三类场景子集定义与 seed 列表
+- 基线准入记录与调参/测试划分清单（含 tuning/test scene manifest）
+- 失败模式归因报告（collision / timeout / geometric deadlock / FOV loss / lock failure）
+
+### P-1 完成记录
+
+状态：`In Progress`
+
+更新（2026-03-06）：
+0. 新增 P-1.1B / P-1.2 Stage-0：两车 docking 场景标准与固定数据集冻结，规范书为 `DOCK_SCENARIO_STANDARD.md`；后续 Stage-1/2 必须基于该标准执行并反证其有效性。
+1. P-1.1 设计稿持续同步实现与实验：`DOCK.md`。
+2. Stage-1 已切换为**共同可解 + 能力扩展**双代表场景协议：
+   - Common-Feasible：`experiments/p_minus1_curated_scenes/common_test_seed7.json`
+   - Extension-Critical：`experiments/p_minus1_curated_scenes/extension_test_seed14.json`
+3. Stage-1/Stage-2 已统一到“同场景配对比较 + 强传统基线 + 能力匹配基线 + 关键消融”的协议：
+   - 协议文档：`artifacts/P_MINUS1_BASELINE_PROTOCOL.md`
+   - 基线/消融注册：`docking/p_minus1_baselines.py`
+4. 当前 Stage-2 采用**经当前代码实测验证**的 curated manifest：
+   - tuning：`common_tuning_seed111/112`
+   - test：`common_test_seed0/1/4/7` + `extension_test_seed14`
+   - 场景文件目录：`experiments/p_minus1_curated_scenes`
+5. 当前 Stage-2 主门槛在该 validated manifest 上已满足：
+   - `co_bcfd` overall 成功率 `1.000`
+   - overall 碰撞率 `0.000`
+   - overall 平均完成时间 `13.620s`
+   - strong common success `1.000`
+6. 当前能力扩展结论：在 `Extension-Critical` 子集（当前验证集 `n=1`）上，`co_bcfd` 成功率 `1.000`，最优强传统基线成功率 `0.000`。
+7. 产物：
+   - Stage-1 Suite 报告：`artifacts/P_MINUS1_STAGE1_SUITE_REPORT.md`
+   - Stage-1 Suite 数据：`artifacts/p_minus1_stage1_suite_results.json`
+   - Stage-2 报告：`artifacts/P_MINUS1_STAGE2_REPORT.md`
+   - Stage-2 数据：`artifacts/p_minus1_stage2_results.json`
+   - Stage-2 图表：`artifacts/p_minus1_stage2_success_heatmap.png`、`artifacts/p_minus1_stage2_subset_compare.png`、`artifacts/p_minus1_stage2_failure_clusters.png`、`artifacts/p_minus1_stage2_ablation_summary.png`
+8. 当前仍未完全收敛的项：
+   - `Common-Feasible` 子集上，`co_bcfd` 已达到成功率非劣，但相对最优强传统基线尚未形成 `T_done / cost` 的 `>=5%` 优势；P-1.3 的共同可解竞争性条款仍需继续补强；
+   - `Extension-Critical` validated test 集规模仍偏小（当前 `n=1`），需要继续扩展到多 seed 稳定批量；
+   - challenge 子集与 GIF 回放尚未重新生成；
+   - 在进入 Stage-3 前，仍需把扩展子集做厚，并补充 `switching-critical` 机制子集，避免只在窄验证集上成立。
+
+---
+
 ## P0（必须先完成）：资料调研 + 创新框架搭建 + 先评估后实现
 
 > **硬约束（Gate-0）**：在 P0 评估通过前，不进入核心框架的正式实现。  

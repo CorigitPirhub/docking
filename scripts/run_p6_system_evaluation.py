@@ -39,7 +39,13 @@ def parse_args() -> argparse.Namespace:
         default="Clustered_At_A,Random_Scattered,Uniform_Spread",
         help="Comma-separated initial dispersion modes.",
     )
-    p.add_argument("--duration-s", type=float, default=60.0, help="Simulation duration for each run.")
+    p.add_argument("--duration-s", type=float, default=60.0, help="Simulation duration upper bound for each run.")
+    p.add_argument(
+        "--time-budget-s",
+        type=float,
+        default=60.0,
+        help="Time budget threshold (s) for done_within_60 metrics (Gate-6 uses 60s even if simulation runs longer).",
+    )
     p.add_argument(
         "--leader-target-speed",
         type=float,
@@ -116,6 +122,7 @@ def _run_one(
     conflict_policy: str,
     seed: int,
     duration_s: float,
+    time_budget_s: float,
     leader_target_speed: float,
     free_target_speed: float,
     inject_disturbance: bool,
@@ -138,7 +145,7 @@ def _run_one(
     out = runner.run()
 
     feas_correct, feas_total = compute_feasibility_proxy_accuracy(runner.engine.snapshots, out.events)
-    done_within_60 = bool(out.success and out.done_time_s <= duration_s + 1e-9)
+    done_within_60 = bool(out.success and out.done_time_s <= float(time_budget_s) + 1e-9)
     cmd_total = int(out.command_exec_accept + out.command_exec_reject)
     cmd_exec_rate = 1.0 if cmd_total <= 0 else float(out.command_exec_accept / cmd_total)
 
@@ -151,6 +158,7 @@ def _run_one(
         "success": bool(out.success),
         "done_within_60": bool(done_within_60),
         "done_time_s": float(out.done_time_s),
+        "time_budget_s": float(time_budget_s),
         "total_energy": float(out.total_energy),
         "collision_count": int(out.collision_count),
         "dock_success_count": int(out.dock_success_count),
@@ -217,6 +225,7 @@ def main() -> None:
                         conflict_policy=spec["conflict_policy"],
                         seed=seed + 7000,
                         duration_s=float(args.duration_s),
+                        time_budget_s=float(args.time_budget_s),
                         leader_target_speed=float(args.leader_target_speed),
                         free_target_speed=float(args.free_target_speed),
                         inject_disturbance=bool(args.inject_disturbance),
@@ -303,6 +312,7 @@ def main() -> None:
     result = {
         "config": {
             "duration_s": float(args.duration_s),
+            "time_budget_s": float(args.time_budget_s),
             "leader_target_speed": float(args.leader_target_speed),
             "free_target_speed": float(args.free_target_speed),
             "n_vehicles": int(n_vehicles),
@@ -343,6 +353,8 @@ def main() -> None:
         "# P6 System Evaluation Report",
         "",
         "## Config",
+        f"- duration_s: {float(args.duration_s):.2f}",
+        f"- time_budget_s: {float(args.time_budget_s):.2f}",
         f"- leader_target_speed: {float(args.leader_target_speed):.2f}",
         f"- free_target_speed: {float(args.free_target_speed):.2f}",
         f"- enable_sensor_noise: {bool(args.enable_sensor_noise)}",

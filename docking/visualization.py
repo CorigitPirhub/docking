@@ -35,6 +35,8 @@ def save_docking_animation(
     obstacles: list[Obstacle],
     output_path: str,
     fps: int = 25,
+    *,
+    max_frames: int | None = 420,
 ) -> None:
     geom = VehicleGeometry(cfg.vehicle)
     fig, ax = plt.subplots(figsize=(10, 5), dpi=160)
@@ -54,10 +56,22 @@ def save_docking_animation(
     ax.add_patch(head_patch)
     fov_patch = Polygon(np.zeros((3, 2)), closed=True, fill=False, edgecolor="tab:cyan", linewidth=1.0, linestyle="--")
     ax.add_patch(fov_patch)
+    follower_traj, = ax.plot([], [], color="tab:blue", linewidth=1.2, alpha=0.8)
+    leader_traj, = ax.plot([], [], color="tab:orange", linewidth=1.2, alpha=0.8)
+    head_traj, = ax.plot([], [], color="tab:green", linewidth=1.0, alpha=0.7)
 
     txt = ax.text(0.01, 0.98, "", transform=ax.transAxes, va="top", ha="left", fontsize=9)
 
     n = len(history.get("t", []))
+    if n <= 0:
+        plt.close(fig)
+        return
+
+    if max_frames is None or max_frames <= 0:
+        frame_indices = list(range(n))
+    else:
+        stride = max(1, int(math.ceil(n / float(max_frames))))
+        frame_indices = list(range(0, n, stride))
 
     def update(i: int):
         follower = VehicleState(
@@ -88,6 +102,9 @@ def save_docking_animation(
         follower_patch.set_xy(geom.body_polygon(follower))
         target_patch.set_xy(geom.body_polygon(target))
         head_patch.set_xy(geom.body_polygon(head))
+        follower_traj.set_data(history["follower_x"][: i + 1], history["follower_y"][: i + 1])
+        leader_traj.set_data(history["target_x"][: i + 1], history["target_y"][: i + 1])
+        head_traj.set_data(history["leader_head_x"][: i + 1], history["leader_head_y"][: i + 1])
 
         fov = _fov_points(follower, geom, cfg.sensors.vision.fov_deg, cfg.sensors.vision.max_distance)
         fov_patch.set_xy(fov)
@@ -102,8 +119,8 @@ def save_docking_animation(
             f"dist={history['distance'][i]:.2f}m pos_err={history['pos_error'][i]:.3f}m"
         )
 
-        return follower_patch, target_patch, head_patch, fov_patch, txt
+        return follower_patch, target_patch, head_patch, fov_patch, follower_traj, leader_traj, head_traj, txt
 
-    ani = FuncAnimation(fig, update, frames=n, interval=1000 / fps, blit=True)
+    ani = FuncAnimation(fig, update, frames=frame_indices, interval=1000 / fps, blit=True)
     ani.save(output_path, writer=PillowWriter(fps=fps))
     plt.close(fig)

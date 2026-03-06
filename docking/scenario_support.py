@@ -949,10 +949,13 @@ class ScenarioGenerator:
             ix, iy = world_to_grid(float(candidate.x), float(candidate.y))
             if not reachable[iy, ix]:
                 return False
-            for obs in obstacles:
-                if self._collision.collide_vehicle_obstacle(candidate, obs, include_clearance=False):
-                    if self._collision.min_clearance_vehicle_obstacles(candidate, [obs]) < spawn_clearance:
-                        return False
+            # IMPORTANT: `spawn_clearance` must be enforced on the full vehicle envelope (including
+            # hitch disks). The previous implementation only checked clearance *after* an obstacle
+            # collision was detected, which allowed near-contact spawns that are collision-free but
+            # violate the intended minimum clearance (notably spawning the front hitch extremely
+            # close to cross-wall faces in B3 Random_Scattered, causing hard-to-recover deadlocks).
+            if self._collision.min_clearance_vehicle_obstacles(candidate, obstacles) < spawn_clearance:
+                return False
             for other in vehicles:
                 if self._collision.collide_vehicle_vehicle(candidate, other, include_clearance=False):
                     return False
@@ -1057,12 +1060,23 @@ class ScenarioGenerator:
                 y_cap = float(min(scatter_y_max, 0.55 * float(half_h)))
                 scatter_y_min = float(max(scatter_y_min, -y_cap))
                 scatter_y_max = float(min(scatter_y_max, y_cap))
+                # Keep scattered starts within a reasonable rejoin envelope around the corridor.
+                # Otherwise the benchmark can be dominated by extreme single-vehicle recovery
+                # (large lateral rejoin + chicane) rather than reconfiguration decisions.
+                corridor_half_w = float(getattr(self.cfg.scenario, "corridor_half_width", 2.0))
+                max_path_dist = float(max(1.2, corridor_half_w - 0.2))
             for _ in range(6000):
                 if len(vehicles) >= n_total:
                     break
                 x = float(rng.uniform(-half_w, scatter_x_max))
                 y = float(rng.uniform(scatter_y_min, scatter_y_max))
                 c = make_state(len(vehicles) + 1, x, y)
+                if mandatory_gates:
+                    # Optional corridor-distance filter (see comment above).
+                    p = np.array([float(x), float(y)], dtype=float)
+                    d_path = float(np.min(np.linalg.norm(path - p, axis=1)))
+                    if d_path > max_path_dist:
+                        continue
                 if collision_free(c):
                     vehicles.append(c)
 

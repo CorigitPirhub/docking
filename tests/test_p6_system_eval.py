@@ -29,8 +29,8 @@ def test_feasibility_proxy_accuracy_basic() -> None:
         Ev(t=1.8, event="DOCK_LOCKED", vehicle_id=2),
     ]
     c, n = compute_feasibility_proxy_accuracy(snapshots, events)
-    assert n == 2
-    assert c == 2
+    assert n == 1
+    assert c == 1
 
 
 def test_summarize_policy() -> None:

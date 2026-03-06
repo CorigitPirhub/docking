@@ -49,9 +49,14 @@ def _snap_value(snap: Any, key: str, default: Any = None) -> Any:
 
 def compute_feasibility_proxy_accuracy(snapshots: list[Any], events: list[Any]) -> tuple[int, int]:
     """
-    Proxy definition:
-    - Prediction: runtime snapshot `feasible` when there are pending dock followers.
-    - Oracle: all currently pending followers eventually receive DOCK_LOCKED (at t >= snapshot.t).
+    Proxy definition (attempt-level):
+    - For each follower that ever appears in `pending_docks`, take the *first* snapshot time it becomes pending.
+    - Prediction: snapshot `feasible` at that first-pending time.
+    - Oracle: that follower eventually receives `DOCK_LOCKED` at t >= first-pending time.
+
+    Rationale:
+    - The feasibility monitor updates at the HIGH layer (≈1Hz), while snapshots are recorded at the LOW layer (≈10Hz).
+    - Counting every LOW snapshot over-weights long docking attempts and can artificially deflate accuracy.
 
     Returns (correct_count, sample_count).
     """
@@ -69,18 +74,24 @@ def compute_feasibility_proxy_accuracy(snapshots: list[Any], events: list[Any]) 
         else:
             lock_time[fid] = min(lock_time[fid], t)
 
-    correct = 0
-    total = 0
+    first_pending: dict[int, tuple[float, bool]] = {}
     for snap in snapshots:
         pending = _snap_value(snap, "pending_docks", {})
         if not pending:
             continue
-        followers = [int(fid) for fid in pending.keys()]
         t = float(_snap_value(snap, "t", 0.0))
         pred = bool(_snap_value(snap, "feasible", True))
-        oracle = all((fid in lock_time) and (lock_time[fid] >= t - 1e-9) for fid in followers)
+        for fid in pending.keys():
+            follower = int(fid)
+            if follower not in first_pending:
+                first_pending[follower] = (t, pred)
+
+    correct = 0
+    total = 0
+    for follower, (t0, pred0) in first_pending.items():
+        oracle = bool((follower in lock_time) and (lock_time[follower] >= float(t0) - 1e-9))
         total += 1
-        correct += int(pred == oracle)
+        correct += int(bool(pred0) == oracle)
     return int(correct), int(total)
 
 

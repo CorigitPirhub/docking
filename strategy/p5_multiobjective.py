@@ -103,9 +103,13 @@ def profile_from_tradeoff(
         w_switch=float(0.15 + 0.95 * obj.w_safety),
     )
     sched = SchedulerConfig(
-        leader_speed_mps=float(_clamp(1.25 + 0.50 * obj.w_time - 0.20 * obj.w_energy, 1.0, 1.85)),
-        free_speed_mps=float(_clamp(1.20 + 0.38 * obj.w_time - 0.16 * obj.w_safety, 1.0, 1.75)),
-        chase_speed_mps=float(_clamp(1.30 + 0.58 * obj.w_time - 0.24 * obj.w_safety, 1.05, 1.95)),
+        # Keep cruise speeds fixed across profiles so Pareto trade-offs come
+        # from reconfiguration decisions (dock/split/wait), not from changing
+        # the physical "baseline driving style". This also ensures the
+        # "independent baseline" is a fair reference for time comparison.
+        leader_speed_mps=1.55,
+        free_speed_mps=1.45,
+        chase_speed_mps=1.65,
         max_accel_mps2=1.0,
         docking_time_s=float(_clamp(2.7 - 0.9 * obj.w_time + 0.6 * obj.w_safety, 1.8, 3.0)),
         sync_tolerance_s=float(_clamp(0.55 + 0.95 * obj.w_safety, 0.5, 1.35)),

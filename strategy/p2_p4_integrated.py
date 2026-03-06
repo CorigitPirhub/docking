@@ -339,6 +339,7 @@ class IntegratedP2P4Runner:
         self._path_s_mem: dict[int, float] = {}
         self._leader_best_s: float = 0.0
         self._leader_best_s_t: float = 0.0
+        self._leader_backoff_until: float = -1e9
 
         self.events: list[DemoEvent] = []
         self.history: list[dict[str, Any]] = []
@@ -369,6 +370,7 @@ class IntegratedP2P4Runner:
         self._join_route_goal_xy: dict[int, np.ndarray] = {}
         self._join_route_planned_at: dict[int, float] = {}
         self._join_route_strict_goal: dict[int, bool] = {}
+        self._join_escape_until: dict[int, float] = {}
         self._gate_escape_phase: dict[int, int] = {}
         self._gate_escape_key: dict[int, tuple[float, float, float]] = {}
         self._gate_escape_dir: dict[int, float] = {}
@@ -579,6 +581,17 @@ class IntegratedP2P4Runner:
             else:
                 self._bottleneck_owner[idx] = None
 
+            # Leader-first bottleneck ownership:
+            # In multi-gate Type-B/C scenes, allowing a non-leader head to enter the wall-pair
+            # region first can trap the global leader behind it (the lead head needs large steering
+            # sweep between walls and gets blocked by the rear vehicle's collision checks). This
+            # shows up as long P6 timeouts (notably B2 Random_Scattered).
+            if self._bottleneck_owner.get(idx, None) is None and int(self.leader_id) in head_ids and int(self.leader_id) in self.states:
+                leader = self.states[int(self.leader_id)]
+                leader_tail_x = float(self.geom.to_world(leader, float(self.geom.rear_x))[0])
+                if leader_tail_x <= float(seg["clear_x"]) + 1e-6:
+                    self._bottleneck_owner[idx] = int(self.leader_id)
+
             if self._bottleneck_owner.get(idx, None) is not None:
                 continue
 
@@ -783,7 +796,7 @@ class IntegratedP2P4Runner:
         # and the serial bottleneck (B3). Applying it to simpler Type-B scenes can
         # over-constrain longitudinal headway and create unnecessary stalls.
         subtype = str(self.case.subtype)
-        if not (subtype.startswith("C") or subtype == "B3"):
+        if not (subtype.startswith("C") or subtype in {"B2", "B3"}):
             return None
         if not self.mandatory_gates:
             return None
@@ -824,21 +837,45 @@ class IntegratedP2P4Runner:
         if idx >= len(self.mandatory_gates):
             return None
 
+        hitch = self.geom.front_hitch(state)
+        hitch_x = float(hitch[0])
+        hitch_y = float(hitch[1])
+
+        def _gate_active(g: dict[str, float]) -> bool:
+            x0 = float(g.get("x0", float(g.get("cx", 0.0)) - 0.2))
+            x1 = float(g.get("x1", float(g.get("cx", 0.0)) + 0.2))
+            y0 = float(g.get("y0", float(g.get("cy", 0.0)) - 0.2))
+            y1 = float(g.get("y1", float(g.get("cy", 0.0)) + 0.2))
+            if y1 < y0:
+                y0, y1 = y1, y0
+
+            # Activate gate logic only in a *near-field* band relative to the front hitch
+            # (collision-critical point when approaching cross-walls).
+            if hitch_x < (x0 - 0.95):
+                return False
+            if hitch_x > (x1 + 1.0):
+                return False
+
+            # Gate assists are recovery behaviors: when the hitch is already within the opening
+            # band, the nominal corridor tracker is stable and faster. Only keep gate logic when
+            # the hitch is *outside* the gap band (risking immediate wall contact), or when a
+            # strict gate-join/escape is latched.
+            strict_join = bool(self._join_route_strict_goal.get(vid, False)) and (vid in self._join_route_xy)
+            hitch_in_gap = bool((float(y0) - 0.10) <= hitch_y <= (float(y1) + 0.10))
+            return bool(strict_join or (not hitch_in_gap))
+
         g = self.mandatory_gates[idx]
-        x0 = float(g.get("x0", 0.0))
-        x1 = float(g.get("x1", 0.0))
-        # Do not activate gate mode too early: long-horizon gate handling can over-constrain
-        # speed and cause multi-vehicle stalls far in front of the first wall. The shared
-        # corridor path already guides the approach; gate mode is primarily a near-field
-        # safety/traversal helper around the wall thickness.
-        # Activate gate-mode only in the near-field. Far-field activation can over-constrain
-        # lateral motion between consecutive chicanes and drive the vehicle into ±90deg yaw
-        # (x-progress stalls). The shared corridor path handles the long-horizon lane change.
-        if state.x < x0 - 1.8:
-            return None
-        if state.x > x1 + 1.0:
-            return None
-        return g
+        if _gate_active(g):
+            return g
+
+        # Reverse/backtrack robustness: if we moved back behind the activation threshold for the
+        # current (monotone) gate index, fall back to the previous gate if it is still relevant.
+        if idx > 0:
+            g_prev = self.mandatory_gates[idx - 1]
+            if _gate_active(g_prev):
+                self._gate_idx_mem[vid] = int(idx - 1)
+                return g_prev
+        return None
 
     def _gate_traversal_goal(self, state: VehicleState, base_speed: float) -> tuple[np.ndarray, float, float] | None:
         gate = self._active_gate(state)
@@ -854,19 +891,21 @@ class IntegratedP2P4Runner:
             y0, y1 = y1, y0
         gap = float(max(0.0, y1 - y0))
 
-        # Gate phase transitions must consider the full vehicle body, not only the hitch.
+        # Gate phase transitions must consider the full vehicle body and the hitch protrusions.
         # We track two reference points with hysteresis:
-        # - `nose_x`: front bumper x (enters gate first)
+        # - `hitch_x`: front hitch x (collision-critical when approaching cross-wall gaps)
         # - `tail_x`: rear bumper x (clears gate last)
         # This prevents the controller from flipping back into "approach/back-off" after the
         # nose clears the wall while the body is still inside the wall thickness.
-        nose_x = float(self.geom.to_world(state, float(self.geom.front_x))[0])
+        hitch = self.geom.front_hitch(state)
+        hitch_x = float(hitch[0])
+        hitch_y = float(hitch[1])
         tail_x = float(self.geom.to_world(state, float(self.geom.rear_x))[0])
 
         # Do not engage gate-mode too early when the vehicle is still far from the gate opening
         # in lateral direction. Between consecutive chicanes, this can otherwise force an overly
         # aggressive lane-change and drive yaw toward ±90deg (x-progress stalls).
-        if gap > 1e-6 and nose_x < (x0 - 0.25):
+        if gap > 1e-6 and hitch_x < (x0 - 0.25):
             half_gap = 0.5 * gap
             if abs(float(state.y) - float(cy)) > (half_gap + 0.75):
                 return None
@@ -892,7 +931,47 @@ class IntegratedP2P4Runner:
         if band_strict is not None:
             y_center = float(np.clip(y_center, float(band_strict[0]), float(band_strict[1])))
 
-        entered = bool(nose_x >= (x0 - 0.10))
+        # Hitch-in-gap safety guard:
+        # If the front hitch is already close to the wall face but outside the opening band,
+        # any forward motion will immediately collide even when the vehicle center is inside.
+        # In that case, request a short back-off + yaw alignment before committing forward.
+        # This is a dominant P6 failure in B2 Random_Scattered (seed=41042).
+        yaw_gate = float(self._gate_heading_yaw(gate))
+        yaw_err_gate = float(abs(angle_diff(yaw_gate, float(state.yaw))))
+        # Large yaw misalignment means the hitch can swing far outside the gap band even when the
+        # vehicle center is still safely inside. Trigger the back-off earlier in that case to
+        # create room for a forward turn; otherwise the controller can fall into a forward/back-off
+        # oscillation that never clears the wall (B3 Clustered_At_A seed=50042).
+        hitch_guard = bool(hitch_x >= (x0 - 0.60)) or bool((yaw_err_gate >= math.radians(35.0)) and (hitch_x >= (x0 - 0.85)))
+        if hitch_guard:
+            hitch_in_gap = bool(float(gap_low) <= float(hitch_y) <= float(gap_high))
+            if not hitch_in_gap:
+                # Back-off target must be large enough to allow a forward turn without sweeping the
+                # protruding front hitch into the wall. However, in scattered starts a second vehicle
+                # can be close behind, and a too-large back-off can create a rear-end deadlock where
+                # neither vehicle can move (B3 Random_Scattered seed=51042). Use an adaptive margin
+                # based on available rear headway.
+                backoff_extra = 1.05
+                rear_dx = math.inf
+                for oid, o in self.states.items():
+                    if int(oid) == int(state.vehicle_id):
+                        continue
+                    if float(o.x) >= float(state.x) - 0.20:
+                        continue
+                    if abs(float(o.y) - float(state.y)) > 1.6:
+                        continue
+                    rear_dx = float(min(rear_dx, float(state.x - o.x)))
+                if rear_dx < 1.85:
+                    backoff_extra = 0.65
+                backoff_x = float(x0 - float(self.geom.front_hitch_x) - float(backoff_extra))
+                if float(state.x) > backoff_x + 0.02:
+                    goal = np.array([backoff_x, float(cy)], dtype=float)
+                    yaw_goal = float(yaw_gate)
+                    v_gate = float(min(base_speed, 0.35, float(self.demo_cfg.gate_speed_cap_mps)))
+                    v_gate = float(max(0.10, v_gate))
+                    return goal, yaw_goal, v_gate
+
+        entered = bool(hitch_x >= (x0 - 0.10))
         cleared = bool(tail_x >= (x1 + 0.10))
         inside = bool(entered and (not cleared))
         committed = False
@@ -900,7 +979,7 @@ class IntegratedP2P4Runner:
             ok_y = bool(float(gap_low) <= float(state.y) <= float(gap_high))
             # When close to the gate wall, "commit" to the forward-through behavior
             # to avoid oscillating at the wall corner.
-            committed = bool((nose_x >= (x0 - 0.50)) and ok_y)
+            committed = bool((hitch_x >= (x0 - 0.50)) and ok_y)
         inside_like = bool(inside or committed)
         if not inside_like and len(self.path_xy) >= 2:
             # For chicanes, the shared corridor path already encodes a gradual lane-change between
@@ -938,14 +1017,18 @@ class IntegratedP2P4Runner:
         # the vehicle aligns to the gate direction but cannot reduce lateral error enough before
         # reaching the wall face, then repeatedly freezes/back-offs. Only force yaw when we're
         # already committed/inside, or very close to the wall face.
-        if inside_like or (nose_x >= (x0 - 0.25)):
-            yaw_goal = float(self._gate_heading_yaw(gate))
+        # Force yaw alignment earlier based on the front hitch proximity (the hitch protrudes
+        # beyond the bumper and can collide with the wall edges even when the body is still
+        # upstream). A too-late switch can lock the vehicle into repeated back-offs before the
+        # wall face (P6 B2 Random_Scattered seed=41042).
+        if inside_like or (hitch_x >= (x0 - 0.85)):
+            yaw_goal = float(yaw_gate)
         yaw_err = float(abs(angle_diff(yaw_goal, state.yaw)))
 
         v_gate = float(base_speed)
-        if nose_x >= (x0 - 1.2):
+        if hitch_x >= (x0 - 1.2):
             v_gate = min(v_gate, 0.55)
-        if (nose_x >= (x0 - 0.6)) or inside_like:
+        if (hitch_x >= (x0 - 0.6)) or inside_like:
             v_gate = min(v_gate, float(self.demo_cfg.gate_speed_cap_mps))
         v_gate = float(max(0.10, v_gate))
         return goal, float(yaw_goal), float(v_gate)
@@ -970,7 +1053,11 @@ class IntegratedP2P4Runner:
         cy = float(gate.get("cy", 0.5 * (y0 + y1)))
 
         # If already inside the gap band, avoid unnecessary reverse.
-        if (float(y0) - 0.10) <= float(state.y) <= (float(y1) + 0.10):
+        # IMPORTANT: use the front hitch position for gap membership.
+        # With large yaw angles, the hitch can fall outside the opening even when the vehicle
+        # center is inside, leading to immediate wall contact and repeated stalls.
+        hitch_y = float(self.geom.front_hitch(state)[1])
+        if (float(y0) - 0.10) <= hitch_y <= (float(y1) + 0.10):
             return None
 
         hitch_x = float(self.geom.front_hitch(state)[0])
@@ -1190,6 +1277,20 @@ class IntegratedP2P4Runner:
         vid = int(state.vehicle_id)
         if vid == int(self.leader_id):
             return None
+        # If this head is already in the cross-wall gate assist region, let the specialized
+        # gate traversal/back-off logic handle it. Forcing the generic leader-yield reverse here
+        # can fight the gate controller and lock both vehicles into a reverse deadlock (B3
+        # Random_Scattered seed=51042).
+        if self._active_gate(state) is not None:
+            return None
+        # If this head is already executing a (potentially strict) join route or deterministic
+        # gate-escape, do not force a reverse-yield that fights the recovery controller.
+        # Otherwise the head can get stuck oscillating in place while the leader remains stalled
+        # (P6 B2 Random_Scattered seed=41042).
+        if vid in self._join_route_xy and (not self._join_route_done(vid)):
+            return None
+        if vid in self._gate_escape_phase or vid in self._gate_escape_key:
+            return None
         leader = self.states.get(int(self.leader_id), None)
         if leader is None:
             return None
@@ -1222,6 +1323,133 @@ class IntegratedP2P4Runner:
         )
         cmd = ControlCommand(accel=accel, steer_rate=unwind)
         cmd = self._enforce_speed_cap(state, cmd, 0.0, allow_reverse=True)
+        return cmd
+
+    def _leader_backoff_for_escaping_front(self, state: VehicleState, now: float) -> ControlCommand | None:
+        """
+        Back-off behavior for the global leader when a front head is stuck in gate-escape.
+
+        Motivation:
+        - In B2/B3 and multi-gate Type-C, Random_Scattered can spawn a non-leader head ahead.
+        - If that head triggers gate-escape and needs to reverse, the leader may be too close behind.
+        - The front head then freezes (collision checks) and the leader cannot pass -> 60s timeout.
+
+        This helper lets the leader reverse briefly to open longitudinal headway so the escaping
+        head can complete its back-off/turn/climb sequence.
+        """
+        if not self.mandatory_gates:
+            return None
+        vid = int(state.vehicle_id)
+        if vid != int(self.leader_id):
+            return None
+        if len(self.states) <= 1:
+            return None
+
+        dt = max(self.cfg.control.dt, 1e-6)
+        if float(now) < float(self._leader_backoff_until):
+            max_rate = math.radians(self.cfg.vehicle.max_steer_rate_deg_s)
+            unwind = float(np.clip(-state.delta / dt, -max_rate, max_rate))
+            v_ref = -0.35
+            accel = float(
+                np.clip((v_ref - float(state.v)) / dt, -self.cfg.vehicle.max_decel, self.cfg.control.speed.max_accel_cmd)
+            )
+            cmd = ControlCommand(accel=accel, steer_rate=unwind)
+            cmd = self._enforce_speed_cap(state, cmd, 0.0, allow_reverse=True)
+            return cmd
+        stall_limit = int(1.0 / dt)
+
+        best_dx = math.inf
+        for oid in self.vehicle_ids:
+            if int(oid) == int(vid):
+                continue
+            # Only consider other FREE heads (ignore trains and docking followers).
+            if self.engine.topology.parent.get(int(oid), None) is not None:
+                continue
+            if self.engine.topology.child.get(int(oid), None) is not None:
+                continue
+            if self.engine.topology.mode.get(int(oid), VehicleMode.FREE) != VehicleMode.FREE:
+                continue
+            escape_active = bool(int(oid) in self._gate_escape_phase or int(oid) in self._gate_escape_key)
+            o = self.states[int(oid)]
+            dx = float(o.x - state.x)
+            if dx <= 0.2 or dx >= 3.20:
+                continue
+            if abs(float(o.y - state.y)) > 2.0:
+                continue
+            gate_o = self._active_gate(o)
+            if gate_o is None:
+                continue
+            band = self._gate_safe_band(gate_o)
+            if band is not None:
+                safe_low, safe_high = float(band[0]), float(band[1])
+            else:
+                y0 = float(gate_o.get("y0", float(gate_o.get("cy", 0.0)) - 0.2))
+                y1 = float(gate_o.get("y1", float(gate_o.get("cy", 0.0)) + 0.2))
+                if y1 < y0:
+                    y0, y1 = y1, y0
+                safe_low, safe_high = float(y0), float(y1)
+            in_safe = bool((safe_low - 0.02) <= float(o.y) <= (safe_high + 0.02))
+
+            needs_room = False
+            if escape_active:
+                stalled = int(self._stall_ticks.get(int(oid), 0))
+                if stalled < stall_limit:
+                    continue
+                phase = int(self._gate_escape_phase.get(int(oid), 0))
+                # If the front head is already safely aligned (late phase + in_safe), do not back off.
+                if in_safe and phase >= 2:
+                    continue
+                needs_room = True
+            else:
+                # Also back off for a front head that is "gate-stuck" and must reverse to recover yaw
+                # / hitch-in-gap, but cannot because the leader is too close behind (B3 Random_Scattered
+                # seed=51042).
+                x0 = float(gate_o.get("x0", float(gate_o.get("cx", 0.0)) - 0.2))
+                y0 = float(gate_o.get("y0", float(gate_o.get("cy", 0.0)) - 0.2))
+                y1 = float(gate_o.get("y1", float(gate_o.get("cy", 0.0)) + 0.2))
+                if y1 < y0:
+                    y0, y1 = y1, y0
+                gap_slack = 0.05
+                gap_low = float(y0 + gap_slack)
+                gap_high = float(y1 - gap_slack)
+                if gap_high < gap_low:
+                    gap_low, gap_high = float(y0), float(y1)
+                hitch = self.geom.front_hitch(o)
+                hitch_x = float(hitch[0])
+                hitch_y = float(hitch[1])
+                hitch_in_gap = bool(gap_low <= hitch_y <= gap_high)
+                yaw_gate = float(self._gate_heading_yaw(gate_o))
+                yaw_err_gate = float(abs(angle_diff(yaw_gate, float(o.yaw))))
+                hitch_guard = bool(hitch_x >= (x0 - 0.60)) or bool(
+                    (yaw_err_gate >= math.radians(35.0)) and (hitch_x >= (x0 - 0.85))
+                )
+                needs_room = bool((not hitch_in_gap) and hitch_guard)
+                # Preemptive leader back-off:
+                # Even if the front head is still moving, it may soon need to reverse-turn to recover
+                # hitch-in-gap near the wall. When the leader is close behind, that reverse-turn is
+                # collision-blocked and both vehicles can deadlock. Trigger back-off early once the
+                # leader is within a close longitudinal band.
+                if needs_room and dx >= 3.00:
+                    needs_room = False
+                if not needs_room:
+                    continue
+
+            best_dx = float(min(best_dx, dx))
+
+        if math.isinf(best_dx):
+            return None
+
+        max_rate = math.radians(self.cfg.vehicle.max_steer_rate_deg_s)
+        unwind = float(np.clip(-state.delta / dt, -max_rate, max_rate))
+        # Use a stronger back-off for gate-stuck cases: front heads typically need ~1m reverse space
+        # to realign their protruding hitch without collision, otherwise the system can deadlock.
+        v_ref = -0.35 if best_dx < 2.10 else -0.18
+        accel = float(
+            np.clip((v_ref - float(state.v)) / dt, -self.cfg.vehicle.max_decel, self.cfg.control.speed.max_accel_cmd)
+        )
+        cmd = ControlCommand(accel=accel, steer_rate=unwind)
+        cmd = self._enforce_speed_cap(state, cmd, 0.0, allow_reverse=True)
+        self._leader_backoff_until = float(max(self._leader_backoff_until, float(now) + 1.2))
         return cmd
 
     def _gate_escape_command(self, state: VehicleState) -> ControlCommand | None:
@@ -1571,6 +1799,48 @@ class IntegratedP2P4Runner:
         rank = int(ordered.index(int(head_id)))
         if rank <= 0:
             return goal
+        # For bottleneck / chicane scenes, a longitudinal queue behind the global goal can
+        # backfire in Random_Scattered starts when a non-leader head spawns *far ahead*:
+        # it may reach its "behind-goal" slot early and park on the shared corridor, blocking
+        # the true leader. In that case, switch the ahead head to a *lateral* parking slot at B.
+        #
+        # IMPORTANT: do *not* do this unconditionally. When the head is behind the leader,
+        # forcing it to park laterally at B can require overtaking the leader near the terminal
+        # area, which is often infeasible and causes 60s timeouts.
+        if self.mandatory_gates and int(self.leader_id) in self.states and int(head_id) != int(self.leader_id):
+            leader_st = self.states[int(self.leader_id)]
+            head_st = self.states[int(head_id)]
+            ahead_leader = bool(float(head_st.x) > float(leader_st.x) + 1.0)
+            if ahead_leader:
+                # Assign lateral parking slots near B for ahead heads.
+                heading = self._goal_heading_vector()
+                normal = np.array([-float(heading[1]), float(heading[0])], dtype=float)
+
+                car_w = float(self.cfg.vehicle.car_width)
+                clr = float(self.cfg.safety.min_clearance)
+                # Parking offsets can use the *full environment* width, not the nominal corridor.
+                # A larger lateral offset prevents the parked head from blocking the leader's
+                # final approach to the global goal (seen in Random_Scattered B/C runs).
+                half_h_env = 0.5 * float(self.cfg.environment.height) - 1.0
+                max_off_env = float(max(0.0, half_h_env - (0.5 * car_w + clr + 0.25)))
+                # Moderate lateral pull-over (paired with strict tolerance below) is enough to
+                # clear the leader's lane while remaining reachable in 60s across random seeds.
+                desired_off = float(1.60 + 0.25 * max(0, int(rank) - 1))
+                off_mag = float(np.clip(desired_off, 1.20, max_off_env)) if max_off_env > 0.0 else 0.0
+                # Choose the parking side to minimize lateral motion: keep the head on its
+                # current side of the corridor/goal instead of forcing a cross-over at x≈goal.
+                sign = 1.0 if float(head_st.y) >= float(goal[1]) else -1.0
+                # Also move the parking slot slightly *forward* in the mission direction so it
+                # remains forward-reachable even if the head overshoots x≈goal before starting
+                # the lateral pull-over.
+                advance = float(1.60 + 0.35 * max(0, int(rank) - 1))
+                goal_slot = goal + heading * float(advance) + normal * float(sign * off_mag)
+
+                # Keep slots within environment bounds (soft clamp, goals are points not states).
+                half_w_env = 0.5 * float(self.cfg.environment.width) - 1.0
+                goal_slot[0] = float(np.clip(goal_slot[0], -half_w_env, half_w_env))
+                goal_slot[1] = float(np.clip(goal_slot[1], -half_h_env, half_h_env))
+                return goal_slot.astype(float).copy()
         # Queue parking slots behind the nominal goal to avoid terminal blocking.
         base_gap = abs(self.geom.front_hitch_x - self.geom.rear_hitch_x) + 0.15
         # Tolerances interact with slot spacing: if the front head is allowed to stop far from its
@@ -1587,9 +1857,12 @@ class IntegratedP2P4Runner:
         # - In B3/C* chicanes, the corridor centerline near the goal can be offset in y.
         # - Using a fixed `h=[1,0]` forces trailing heads to climb laterally toward `goal.y` too early,
         #   which can be slow/unnecessary and dominate the 60s P6 budget.
-        if self.mandatory_gates and len(self.path_xy) >= 2 and len(self.path_s) == len(self.path_xy):
+        # Additionally, when lane-offset tracking is enabled in Type-A open scenes, use the
+        # per-head tracked corridor (offset path) so parked heads do not block the global leader.
+        ref_path_xy = self._track_path_xy(int(head_id))
+        if len(ref_path_xy) >= 2 and len(self.path_s) == len(ref_path_xy):
             slot_s = float(max(0.0, float(self.path_len) - float(slot_gap) * float(rank)))
-            return _interp_path(self.path_xy, self.path_s, slot_s).astype(float).copy()
+            return _interp_path(ref_path_xy, self.path_s, slot_s).astype(float).copy()
         h = self._goal_heading_vector()
         return goal - h * (slot_gap * float(rank))
 
@@ -1626,6 +1899,40 @@ class IntegratedP2P4Runner:
         ref = self.path_xy if path_xy is None else path_xy
         idx = _nearest_path_idx(ref, state.xy())
         return float(np.linalg.norm(state.xy() - ref[idx]))
+
+    def _same_lane_band(self) -> float:
+        """
+        Lateral band for treating two vehicles as sharing the same "lane" on the corridor.
+
+        This is used by conservative car-following/overtake guards. A too-large band can
+        freeze the global leader behind a slightly offset head in Clustered_At_A starts,
+        even when there is enough clearance to pass side-by-side.
+        """
+        car_w = float(self.cfg.vehicle.car_width)
+        clr = float(self.cfg.safety.min_clearance)
+        # car width + clearance + small margin for hitch disks / yaw variation.
+        return float(max(0.40, car_w + clr + 0.10))
+
+    def _signed_lateral_to_path(self, state: VehicleState, path_xy: np.ndarray | None = None) -> float:
+        ref = self.path_xy if path_xy is None else path_xy
+        if len(ref) < 2:
+            return 0.0
+        vid = int(state.vehicle_id)
+        if path_xy is not None and path_xy is not self.path_xy:
+            idx = _nearest_path_idx(ref, state.xy())
+        else:
+            idx = int(self._path_idx_mem.get(vid, _nearest_path_idx(ref, state.xy())))
+        idx = max(0, min(int(idx), len(ref) - 1))
+        if idx < len(ref) - 1:
+            d = ref[idx + 1] - ref[idx]
+        else:
+            d = ref[idx] - ref[idx - 1]
+        n = float(np.linalg.norm(d))
+        if n < 1e-9:
+            return 0.0
+        t = d / n
+        nvec = np.array([-float(t[1]), float(t[0])], dtype=float)
+        return float((state.xy() - ref[idx]) @ nvec)
 
     def _maybe_plan_join_route(self, vehicle_id: int, now: float) -> None:
         """
@@ -1695,20 +2002,39 @@ class IntegratedP2P4Runner:
                 # reverse/back-off oscillations that dominate the 60s P6 budget in B3/C*.
                 staging_margin = 0.75
                 gate_join_x = float(x0 - float(self.geom.front_hitch_x) - staging_margin)
-                # Prefer lateral correction at the current x when far upstream:
-                # pushing x forward too early can trigger repeated escape/back-off oscillations
-                # (especially for narrow Type-C gates) and dominate the P6 time budget.
-                gate_join_x = float(min(gate_join_x, float(st.x)))
+                # Gate-staging join should be kinematically feasible:
+                # - A purely lateral (vertical) join target at the current x can be hard/impossible
+                #   for Ackermann to realize quickly, and can deadlock with a leader behind
+                #   (P6 B2 Random_Scattered seed=41042).
+                # - When sufficiently upstream, allow advancing toward the canonical staging x so
+                #   the join route is diagonal (forward + lateral), improving feasibility.
+                # - When already close to the wall face, avoid pushing x forward while still
+                #   outside the opening band (front hitch protrudes).
+                if float(st.x) > gate_join_x - 1.0:
+                    gate_join_x = float(min(gate_join_x, float(st.x)))
                 gate_join_xy = np.array([gate_join_x, float(cy)], dtype=float)
         # Only replan occasionally to bound compute cost.
         last_t = float(self._join_route_planned_at.get(vid, -1e9))
         if (now - last_t) < 2.0:
             return
 
+        stall_trigger = bool(stall_ticks >= stall_limit)
+        # In bottleneck/gate scenes, a head can be "stalled" on-path due to gate-yield or
+        # multi-vehicle interactions. Triggering an A* join-route purely from stall ticks can
+        # cause unnecessary rejoin replans and even regress progress (P6 B2 scattered timeouts).
+        if self.mandatory_gates:
+            stall_trigger = bool(stall_trigger and dist_to_path >= 0.85)
+        subtype = str(self.case.subtype)
+        dist_join = 1.25
+        # In multi-gate / chicane scenes, waiting for very large lateral error before planning a
+        # join route can allow the Stanley corridor tracker to enter large oscillations, wasting
+        # most of the 60s P6 budget (B2/B3 Random_Scattered). Use a lower trigger threshold.
+        if self.mandatory_gates and (subtype.startswith("C") or subtype in {"B2", "B3"}):
+            dist_join = 0.95
         need_join = bool(
-            dist_to_path >= 1.25
+            dist_to_path >= dist_join
             or (blocked >= 16 and dist_to_path >= 0.85)
-            or (stall_ticks >= stall_limit)
+            or stall_trigger
             or gate_need_join
         )
 
@@ -1754,10 +2080,16 @@ class IntegratedP2P4Runner:
                     join_s = float(max(0.0, leader_s - 2.4))
                     join_xy = _interp_path(self.path_xy, self.path_s, join_s).astype(float).copy()
                 else:
-                    join_idx = _join_idx_for_monotone_x(path_xy, st.xy())
+                    x_sign = 1.0 if float(self.path_xy[-1, 0] - self.path_xy[0, 0]) >= 0.0 else -1.0
+                    join_ahead = float(np.clip(0.60 * float(dist_to_path) + 1.20, 1.20, 3.00))
+                    x_target = float(st.x + x_sign * join_ahead)
+                    join_idx = _join_idx_for_monotone_x(path_xy, np.array([x_target, float(st.y)], dtype=float))
                     join_xy = path_xy[join_idx].astype(float).copy()
             else:
-                join_idx = _join_idx_for_monotone_x(path_xy, st.xy())
+                x_sign = 1.0 if float(self.path_xy[-1, 0] - self.path_xy[0, 0]) >= 0.0 else -1.0
+                join_ahead = float(np.clip(0.60 * float(dist_to_path) + 1.20, 1.20, 3.00))
+                x_target = float(st.x + x_sign * join_ahead)
+                join_idx = _join_idx_for_monotone_x(path_xy, np.array([x_target, float(st.y)], dtype=float))
                 join_xy = path_xy[join_idx].astype(float).copy()
 
         # If the vehicle is currently behind an active cross-wall (y outside the gap),
@@ -1778,10 +2110,16 @@ class IntegratedP2P4Runner:
                 # a short-horizon local planner that could stall (P6 timeouts in C1/C2 Uniform_Spread).
                 staging_margin = 0.75
                 front_hitch_x = float(self.geom.to_world(st, float(self.geom.front_hitch_x))[0])
+                canonical_x = float(x0 - float(self.geom.front_hitch_x) - staging_margin)
                 if front_hitch_x <= float(x0 - staging_margin):
-                    staging_x = float(st.x)
+                    # When far upstream, avoid a purely lateral (vertical) staging move at the
+                    # current x: that behavior can drive yaw toward ±90deg and create a
+                    # rear-end deadlock in scattered starts (P6 B2 Random_Scattered seed=41042).
+                    # Instead, advance toward the canonical staging x gradually so the join path
+                    # remains diagonal (forward + lateral).
+                    staging_x = float(min(canonical_x, float(st.x) + 1.2))
                 else:
-                    staging_x = float(x0 - float(self.geom.front_hitch_x) - staging_margin)
+                    staging_x = float(canonical_x)
                 # Cap required backtracking so the join route remains mostly forward-executable.
                 staging_x = float(max(staging_x, float(st.x) - 0.35))
                 staging = np.array([staging_x, float(cy)], dtype=float)
@@ -1821,6 +2159,11 @@ class IntegratedP2P4Runner:
                 in_band = bool((y0 - 0.10) <= float(st.y) <= (y1 + 0.10))
             else:
                 in_band = True
+            # If we've already entered the gap band and progressed past the staging x, allow
+            # clearing the strict join route. Keeping it active too long can force oscillatory
+            # "rejoin" behavior and regress x-progress in B2 chicanes (P6 seed=41042).
+            if in_band and float(st.x) >= float(join_xy[0]) + 0.25:
+                return True
             return bool(d <= 0.55 and in_band)
         if float(np.linalg.norm(st.xy() - join_xy)) <= 0.75:
             return True
@@ -1870,7 +2213,7 @@ class IntegratedP2P4Runner:
         d = self._nearest_obstacle_distance(state)
         v = float(base_speed)
         subtype = str(self.case.subtype)
-        relax = bool(subtype.startswith("C") or subtype == "B3")
+        relax = bool(subtype.startswith("C") or subtype in {"B2", "B3"})
         if d < 1.2:
             v = min(v, 0.90)
         if d < 0.9:
@@ -1888,17 +2231,28 @@ class IntegratedP2P4Runner:
         return float(max(min_v, v))
 
     def _speed_limit_by_lead_vehicle(self, vehicle_id: int, base_speed: float) -> float:
-        s_self = self._path_progress_s(self.states[vehicle_id])
-        lat_self = self._lateral_distance_to_path(self.states[vehicle_id])
+        st_self = self.states[vehicle_id]
+        s_self = self._path_progress_s(st_self)
+        lat_self = self._signed_lateral_to_path(st_self)
+        band = self._same_lane_band()
+        # World-frame lateral guard:
+        # Signed lateral distance is computed w.r.t. local path normals. Near diagonal path segments,
+        # the normal can have a strong x-component, making two vehicles with large `|y|` separation
+        # appear to share the same lane. This can incorrectly stop the leader behind a laterally
+        # parked head near B (P6 C2 Random_Scattered seed=71042).
+        y_band = float(max(1.2, 1.8 * band))
         lead_gap = math.inf
         for oid in self.vehicle_ids:
             if oid == vehicle_id:
                 continue
-            s_o = self._path_progress_s(self.states[oid])
+            st_o = self.states[oid]
+            if abs(float(st_o.y) - float(st_self.y)) > y_band:
+                continue
+            s_o = self._path_progress_s(st_o)
             if s_o <= s_self:
                 continue
-            lat_o = self._lateral_distance_to_path(self.states[oid])
-            if abs(lat_o - lat_self) > 1.2:
+            lat_o = self._signed_lateral_to_path(st_o)
+            if abs(lat_o - lat_self) > band:
                 continue
             lead_gap = min(lead_gap, s_o - s_self)
         if math.isinf(lead_gap):
@@ -1932,7 +2286,24 @@ class IntegratedP2P4Runner:
             if dx <= 1e-6:
                 continue
             # Ignore vehicles far away laterally.
-            if abs(float(o.y - st.y)) > 1.1:
+            #
+            # IMPORTANT (B/C chicanes):
+            # In multi-gate scenes, a lead vehicle may need to perform a large lateral lane-change
+            # while still being "in front" of a rear vehicle. Using the nominal same-lane band
+            # (≈ vehicle width) can mis-classify that lead as a different lane, allowing the rear
+            # vehicle to close in too much and deadlock the lead's steering sweep (P6 B2
+            # Random_Scattered seed=41042).
+            band = float(self._same_lane_band())
+            if self.mandatory_gates and (str(self.case.subtype).startswith("C") or str(self.case.subtype) in {"B2", "B3"}):
+                try:
+                    x0_min = min(float(g.get("x0", float(g.get("cx", 0.0)))) for g in self.mandatory_gates)
+                except ValueError:
+                    x0_min = float("inf")
+                # Enlarge the lateral band in the gate-approach neighborhood (≈ 4m upstream),
+                # matching the far-field gate hint logic used for join-route planning.
+                if (float(st.x) >= (x0_min - 4.2)) or (float(o.x) >= (x0_min - 4.2)):
+                    band = float(max(band, 1.95))
+            if abs(float(o.y - st.y)) > band:
                 continue
             if dx < lead_dx:
                 lead_dx = dx
@@ -2020,11 +2391,10 @@ class IntegratedP2P4Runner:
         return float(max(0.0, v_cap))
 
     def _enforce_speed_target(self, state: VehicleState, cmd: ControlCommand, target_speed: float) -> ControlCommand:
-        dt = max(self.cfg.control.dt, 1e-6)
-        target_v = float(max(0.0, target_speed))
-        accel_cap = float((target_v - state.v) / dt)
-        accel = float(np.clip(cmd.accel, -self.cfg.vehicle.max_decel, min(self.cfg.control.speed.max_accel_cmd, accel_cap)))
-        return ControlCommand(accel=accel, steer_rate=float(cmd.steer_rate))
+        # Keep a one-step speed cap consistent with actuator limits.
+        # (The previous accel-cap clip could generate invalid accel ranges when `accel_cap`
+        # was more negative than `-max_decel`, producing accelerations below the physical limit.)
+        return self._enforce_speed_cap(state, cmd, float(max(0.0, target_speed)), allow_reverse=False)
 
     def _speed_accel_cmd(self, v_now: float, target_speed: float) -> float:
         v_ref = float(np.clip(target_speed, 0.0, self.cfg.vehicle.max_speed))
@@ -2704,13 +3074,34 @@ class IntegratedP2P4Runner:
             if hold_reason is not None:
                 if len(chain) == 1:
                     dt = max(self.cfg.control.dt, 1e-6)
-                    cmd_stop = self._stop_command(head_state)
-                    nxt_stop = self.ack.step(head_state, cmd_stop, dt)
+                    cmd_hold = self._stop_command(head_state)
+                    # Bottleneck coordination for scattered starts:
+                    # When the global leader owns the upcoming wall-pair bottleneck, a non-leader
+                    # head that happens to be in front may need to actively reverse-yield; simply
+                    # stopping in-lane can permanently block the leader and cause 60s timeouts
+                    # (notably P6 B2/B3 Random_Scattered).
+                    if head != self.leader_id and int(self.leader_id) in self.states:
+                        leader_st = self.states[int(self.leader_id)]
+                        ahead_leader = bool(float(head_state.x) > float(leader_st.x) + 0.55)
+                        if ahead_leader:
+                            max_rate = math.radians(self.cfg.vehicle.max_steer_rate_deg_s)
+                            unwind = float(np.clip(-head_state.delta / dt, -max_rate, max_rate))
+                            v_ref = -0.35
+                            accel = float(
+                                np.clip(
+                                    (v_ref - float(head_state.v)) / dt,
+                                    -self.cfg.vehicle.max_decel,
+                                    self.cfg.control.speed.max_accel_cmd,
+                                )
+                            )
+                            cmd_hold = ControlCommand(accel=accel, steer_rate=unwind)
+                            cmd_hold = self._enforce_speed_cap(head_state, cmd_hold, 0.0, allow_reverse=True)
+                    nxt_stop = self.ack.step(head_state, cmd_hold, dt)
                     others = [self.states[j] for j in self.vehicle_ids if j != head]
                     if self._collision_with_obstacles_fast(nxt_stop) or self._collision_with_others_fast(nxt_stop, others):
-                        cmd_stop = self._stop_command(head_state)
+                        cmd_hold = self._stop_command(head_state)
                         nxt_stop = self._freeze_state(head_state)
-                    self._store_cmd(int(head), cmd_stop, now)
+                    self._store_cmd(int(head), cmd_hold, now)
                     self.states[int(head)] = nxt_stop
                     updated.add(int(head))
                     continue
@@ -2804,14 +3195,33 @@ class IntegratedP2P4Runner:
                         gate_o = self._active_gate(o)
                         if gate_o is None:
                             continue
-                        y0 = float(gate_o.get("y0", float(gate_o.get("cy", 0.0)) - 0.2))
-                        y1 = float(gate_o.get("y1", float(gate_o.get("cy", 0.0)) + 0.2))
-                        if y1 < y0:
-                            y0, y1 = y1, y0
-                        out_of_band = not ((y0 - 0.10) <= float(o.y) <= (y1 + 0.10))
-                        if not out_of_band:
+                        band = self._gate_safe_band(gate_o)
+                        if band is not None:
+                            safe_low, safe_high = float(band[0]), float(band[1])
+                        else:
+                            y0 = float(gate_o.get("y0", float(gate_o.get("cy", 0.0)) - 0.2))
+                            y1 = float(gate_o.get("y1", float(gate_o.get("cy", 0.0)) + 0.2))
+                            if y1 < y0:
+                                y0, y1 = y1, y0
+                            safe_low, safe_high = float(y0), float(y1)
+                        in_safe = bool((safe_low - 0.02) <= float(o.y) <= (safe_high + 0.02))
+                        escape_phase = self._gate_escape_phase.get(int(oid), None)
+                        needs_room = False
+                        if escaping:
+                            # Escape can remain active after entering the *gap* band. When still
+                            # outside the stricter safe band (or in early escape phases), the front
+                            # head may need to reverse/back-off again. Do not let the leader close
+                            # in and collision-block the escape (P6 B2/B3 Random_Scattered).
+                            if escape_phase is None:
+                                needs_room = bool(not in_safe)
+                            else:
+                                needs_room = bool(int(escape_phase) <= 1 or (not in_safe))
+                        else:
+                            # Strict join routes: keep buffer until the head is inside the safe band.
+                            needs_room = bool(not in_safe)
+                        if not needs_room:
                             continue
-                        # Keep a buffer while the other head is recovering into the gap band.
+                        # Keep a buffer while the other head is recovering into the safe band.
                         if dx < 2.2:
                             target_speed = min(target_speed, 0.0)
                         elif dx < 3.2:
@@ -2819,6 +3229,17 @@ class IntegratedP2P4Runner:
             goal_xy_head = self._goal_for_head(head)
             dist_goal_head = float(np.linalg.norm(self.states[head].xy() - goal_xy_head))
             head_goal_tol = self.demo_cfg.leader_goal_tol_m if head == self.leader_id else self.demo_cfg.vehicle_goal_tol_m
+            # Stricter parking tolerance for lateral goal slots:
+            # When a non-leader head is assigned a lateral parking slot near B, the default
+            # vehicle_goal_tol_m (≈1.2m) can allow it to stop while still occupying the leader's
+            # corridor centerline, blocking the leader from satisfying its tighter goal tolerance.
+            # Use a tighter tolerance for such lateral slots so the head actually clears the lane.
+            if (
+                head != self.leader_id
+                and self.mandatory_gates
+                and float(np.linalg.norm(goal_xy_head - self.case.goal_xy)) >= 0.70
+            ):
+                head_goal_tol = float(min(head_goal_tol, 0.60))
             if dist_goal_head <= head_goal_tol:
                 for sid in chain:
                     s_old = self.states[sid]
@@ -2877,6 +3298,18 @@ class IntegratedP2P4Runner:
             # single head vehicle
             others = [self.states[j] for j in self.vehicle_ids if j != head]
 
+            cmd_leader_backoff = self._leader_backoff_for_escaping_front(head_state, now)
+            if cmd_leader_backoff is not None:
+                dt = float(self.cfg.control.dt)
+                nxt_back = self.ack.step(head_state, cmd_leader_backoff, dt)
+                if self._collision_with_obstacles_fast(nxt_back) or self._collision_with_others_fast(nxt_back, others):
+                    cmd_leader_backoff = self._stop_command(head_state)
+                    nxt_back = self._freeze_state(head_state)
+                self._store_cmd(head, cmd_leader_backoff, now)
+                self.states[head] = nxt_back
+                updated.add(head)
+                continue
+
             cmd_front_yield = self._front_yield_for_stalled_leader(head_state, now)
             if cmd_front_yield is not None:
                 dt = float(self.cfg.control.dt)
@@ -2932,6 +3365,18 @@ class IntegratedP2P4Runner:
                 leader_st = self.states[self.leader_id]
                 d_lead = float(np.linalg.norm(head_state.xy() - leader_st.xy()))
                 leader_goal_dist = float(np.linalg.norm(leader_st.xy() - self._goal_for_head(self.leader_id)))
+                # Early queue-yield: if a non-leader head starts slightly ahead and laterally offset,
+                # it tends to merge toward the corridor while the leader also tracks a curved path,
+                # producing a near side-by-side squeeze that freezes both vehicles (P6 B3/C*
+                # Clustered_At_A). Slow the non-leader briefly so the leader becomes the front head
+                # before the merge happens.
+                if d_lead < 2.6 and float(self._path_progress_s(leader_st)) < 5.0:
+                    dx = float(head_state.x - leader_st.x)
+                    if 0.10 <= dx <= 0.85 and abs(float(head_state.y - leader_st.y)) <= 1.8:
+                        band = self._same_lane_band()
+                        lane_sep = float(abs(self._signed_lateral_to_path(head_state) - self._signed_lateral_to_path(leader_st)))
+                        if lane_sep > band:
+                            target_speed = min(target_speed, 0.45)
                 # Hard rear-end guard in split mode: follower must not compress into leader.
                 behind_leader = bool(float(head_state.x) < float(leader_st.x) - 0.35)
                 ahead_leader = bool(float(head_state.x) > float(leader_st.x) + 0.35)
@@ -2944,10 +3389,30 @@ class IntegratedP2P4Runner:
                     #   slip past the leader laterally, then its slot-goal (behind B) becomes
                     #   unreachable without reversing (not supported by the nominal tracker),
                     #   causing timeouts.
-                    lat_self = float(self._lateral_distance_to_path(head_state))
-                    lat_lead = float(self._lateral_distance_to_path(leader_st))
-                    if lat_self <= 0.90 and lat_lead <= 0.90 and abs(float(head_state.y - leader_st.y)) <= 1.2:
-                        target_speed = min(target_speed, 0.0)
+                    # IMPORTANT:
+                    # This limiter is intended for Type-A "open corridor" scenes where a follower
+                    # can slip past the leader near the start and later be unable to reach its
+                    # assigned slot without reversing. In B/C bottleneck scenes (mandatory gates),
+                    # applying it can unnecessarily slow down the front head while it performs
+                    # the chicane lane-change, causing P6 timeouts (notably B2 Random_Scattered).
+                    if not self.mandatory_gates:
+                        band = self._same_lane_band()
+                        lat_self = float(self._signed_lateral_to_path(head_state))
+                        lat_lead = float(self._signed_lateral_to_path(leader_st))
+                        lane_sep = float(abs(lat_self - lat_lead))
+                        dx = float(head_state.x - leader_st.x)
+                        # Only enforce when the two heads are within a short longitudinal window;
+                        # otherwise the cap can dominate completion time without improving safety.
+                        if (
+                            dx <= 1.0
+                            and abs(lat_self) <= 0.90
+                            and abs(lat_lead) <= 0.90
+                            and lane_sep <= band
+                            and abs(float(head_state.y - leader_st.y)) <= 1.2
+                        ):
+                            # Do not hard-freeze: allow slow motion so the head can drift to its
+                            # lane-offset / open space and let the leader proceed.
+                            target_speed = min(target_speed, 0.25)
                 if d_lead < 1.8:
                     # Only apply a full stop when the follower is *behind* the leader in the
                     # corridor direction. In scattered starts, vehicles can become close while
@@ -2976,152 +3441,279 @@ class IntegratedP2P4Runner:
                         target_speed = min(target_speed, 0.45)
 
             join_route = None
-            if self.mandatory_gates:
-                # Global join route (A*): when the vehicle starts far away from the shared corridor,
-                # first navigate to the nearest corridor point through obstacle-separated pockets.
-                self._maybe_plan_join_route(head, now)
-                join_route = self._join_route_xy.get(int(head), None)
-                if join_route is not None:
-                    if self._join_route_done(int(head)):
-                        self._join_route_xy.pop(int(head), None)
-                        self._join_route_goal_xy.pop(int(head), None)
-                        self._join_route_strict_goal.pop(int(head), None)
-                        join_route = None
-                    else:
-                        join_speed = float(min(target_speed, 0.75))
-                        if bool(self._join_route_strict_goal.get(int(head), False)):
-                            # Gate-crossing join routes are safety-critical; keep speed low to
-                            # reduce wall-grazing collisions in narrow gaps.
-                            join_speed = float(min(join_speed, 0.55))
+            # Global join route (A*): when the vehicle starts far away from the shared corridor,
+            # first navigate to the nearest corridor point through obstacle-separated pockets.
+            #
+            # NOTE: This must not be limited to gate-based scenarios only. Random_Scattered A-type
+            # cases can also spawn vehicles behind obstacle pockets where pure corridor tracking
+            # will stall indefinitely (P6 timeouts).
+            self._maybe_plan_join_route(head, now)
+            join_route = self._join_route_xy.get(int(head), None)
+            if join_route is not None:
+                if self._join_route_done(int(head)):
+                    self._join_route_xy.pop(int(head), None)
+                    self._join_route_goal_xy.pop(int(head), None)
+                    self._join_route_strict_goal.pop(int(head), None)
+                    join_route = None
+                else:
+                    join_speed = float(min(target_speed, 0.75))
+                    if bool(self._join_route_strict_goal.get(int(head), False)):
+                        # Gate-crossing join routes are safety-critical; keep speed low to
+                        # reduce wall-grazing collisions in narrow gaps.
+                        join_speed = float(min(join_speed, 0.55))
 
-                            # If enabled, allow the deterministic gate-escape state machine to
-                            # take over inside strict (gate-crossing) join-routes. This provides a
-                            # kinematically realizable backoff/turn/climb sequence that prevents
-                            # the common stall where the vehicle creeps toward the wall face while
-                            # yaw changes too slowly, then freezes due to collision checks.
-                            if self.demo_cfg.enable_gate_escape:
-                                cmd_escape = self._gate_escape_command(head_state)
-                                if cmd_escape is not None:
-                                    dt = float(self.cfg.control.dt)
-                                    nxt_escape = self.ack.step(head_state, cmd_escape, dt)
-                                    if self._collision_with_obstacles_fast(nxt_escape) or self._collision_with_others_fast(nxt_escape, others):
-                                        cmd_escape = self._stop_command(head_state)
-                                        nxt_escape = self._freeze_state(head_state)
-                                    self._store_cmd(head, cmd_escape, now)
-                                    self.states[head] = nxt_escape
+                        # If enabled, allow the deterministic gate-escape state machine to
+                        # take over inside strict (gate-crossing) join-routes. This provides a
+                        # kinematically realizable backoff/turn/climb sequence that prevents
+                        # the common stall where the vehicle creeps toward the wall face while
+                        # yaw changes too slowly, then freezes due to collision checks.
+                        if self.demo_cfg.enable_gate_escape:
+                            cmd_escape = self._gate_escape_command(head_state)
+                            if cmd_escape is not None:
+                                dt = float(self.cfg.control.dt)
+                                nxt_escape = self.ack.step(head_state, cmd_escape, dt)
+                                if self._collision_with_obstacles_fast(nxt_escape) or self._collision_with_others_fast(nxt_escape, others):
+                                    cmd_escape = self._stop_command(head_state)
+                                    nxt_escape = self._freeze_state(head_state)
+                                self._store_cmd(head, cmd_escape, now)
+                                self.states[head] = nxt_escape
+                                self._blocked_ticks[head] = 0
+                                updated.add(head)
+                                continue
+                    strict_join = bool(self._join_route_strict_goal.get(int(head), False))
+                    join_goal = self._join_route_goal_xy.get(int(head), None)
+                    dist_goal = float(np.linalg.norm(head_state.xy() - join_goal)) if join_goal is not None else 0.0
+                    # Join-route stall rescue:
+                    # When far-scattered starts generate a straight A* route that runs close to an obstacle
+                    # corner, the vehicle can get stuck with v≈0 while steering changes (yaw cannot change
+                    # without motion). If we observe sustained stall while a join-route is active, apply a
+                    # short reverse-turn maneuver to create room and reduce heading error to the join goal.
+                    if not strict_join:
+                        stall_ticks = int(self._stall_ticks.get(int(head), 0))
+                        stall_limit = int(2.0 / max(self.cfg.control.dt, 1e-6))
+                        if stall_ticks >= stall_limit:
+                            until = float(self._join_escape_until.get(int(head), -1e9))
+                            if stall_ticks >= 2 * stall_limit and abs(float(head_state.v)) <= 0.12:
+                                until = float(max(until, now + 0.9))
+                                self._join_escape_until[int(head)] = float(until)
+                            if now <= until:
+                                dt = float(self.cfg.control.dt)
+                                max_rate = math.radians(self.cfg.vehicle.max_steer_rate_deg_s)
+                                dmax = math.radians(self.cfg.vehicle.max_steer_deg)
+                                vec_to_goal = (join_goal - head_state.xy()) if join_goal is not None else (tgt - head_state.xy())
+                                yaw_tgt = float(math.atan2(float(vec_to_goal[1]), float(vec_to_goal[0])))
+                                yaw_err = float(angle_diff(yaw_tgt, float(head_state.yaw)))
+                                # In reverse, yaw rate flips sign: steer opposite to yaw error.
+                                steer_sign = -1.0 if yaw_err > 1e-6 else (1.0 if yaw_err < -1e-6 else 0.0)
+                                delta_target = float(np.clip(steer_sign * 0.55, -dmax, dmax))
+                                steer_rate = float(
+                                    np.clip((delta_target - float(head_state.delta)) / max(dt, 1e-6), -max_rate, max_rate)
+                                )
+                                v_ref = -0.25
+                                accel = float(
+                                    np.clip(
+                                        (v_ref - float(head_state.v)) / max(dt, 1e-6),
+                                        -self.cfg.vehicle.max_decel,
+                                        self.cfg.control.speed.max_accel_cmd,
+                                    )
+                                )
+                                cmd_bk = ControlCommand(accel=accel, steer_rate=steer_rate)
+                                cmd_bk = self._enforce_speed_cap(head_state, cmd_bk, 0.0, allow_reverse=True)
+                                nxt_bk = self.ack.step(head_state, cmd_bk, dt)
+                                if (not self._collision_with_obstacles_fast(nxt_bk)) and (
+                                    not self._collision_with_others_fast(nxt_bk, others)
+                                ):
+                                    self._blocked_ticks[head] = 0
+                                    self._store_cmd(head, cmd_bk, now)
+                                    self.states[head] = nxt_bk
+                                    updated.add(head)
+                                    continue
+                    # Dynamic lookahead for sparse A* routes:
+                    # - Too-small lookahead can pick a target extremely close to the vehicle
+                    #   when following a long straight segment, forcing saturated steering and
+                    #   circular limit-cycles (P6 B3/C* scattered timeouts).
+                    # - Scale lookahead with remaining join-goal distance, but cap it for
+                    #   strict gate staging to avoid cutting across the wall neighborhood.
+                    join_lookahead = float(np.clip(0.30 * dist_goal + 0.8, 1.6, 4.0))
+                    if strict_join:
+                        join_lookahead = float(min(join_lookahead, 3.2))
+                    tgt, _tgt_yaw = self._route_target_ahead(head_state, join_route, lookahead_m=float(join_lookahead))
+                    # If the computed target is still too close while the goal is far away,
+                    # extend lookahead once to avoid tight orbits.
+                    if dist_goal >= 2.0 and float(np.linalg.norm(tgt - head_state.xy())) < 0.75 and join_lookahead < 3.9:
+                        tgt, _tgt_yaw = self._route_target_ahead(
+                            head_state,
+                            join_route,
+                            lookahead_m=float(min(4.0, join_lookahead + 1.0)),
+                        )
+                    vec = tgt - head_state.xy()
+                    heading = np.array([math.cos(float(head_state.yaw)), math.sin(float(head_state.yaw))], dtype=float)
+                    behind = bool(float(np.dot(vec, heading)) < -0.15 and float(np.linalg.norm(vec)) > 0.35)
+                    if behind:
+                        if strict_join:
+                            cmd_backoff = self._gate_backoff_command(head_state)
+                            if cmd_backoff is not None:
+                                nxt_back = self.ack.step(head_state, cmd_backoff, self.cfg.control.dt)
+                                if not (
+                                    self._collision_with_obstacles_fast(nxt_back)
+                                    or self._collision_with_others_fast(nxt_back, others)
+                                ):
+                                    self._store_cmd(head, cmd_backoff, now)
+                                    self.states[head] = nxt_back
                                     self._blocked_ticks[head] = 0
                                     updated.add(head)
                                     continue
-                        strict_join = bool(self._join_route_strict_goal.get(int(head), False))
-                        join_goal = self._join_route_goal_xy.get(int(head), None)
-                        dist_goal = float(np.linalg.norm(head_state.xy() - join_goal)) if join_goal is not None else 0.0
-                        # Dynamic lookahead for sparse A* routes:
-                        # - Too-small lookahead can pick a target extremely close to the vehicle
-                        #   when following a long straight segment, forcing saturated steering and
-                        #   circular limit-cycles (P6 B3/C* scattered timeouts).
-                        # - Scale lookahead with remaining join-goal distance, but cap it for
-                        #   strict gate staging to avoid cutting across the wall neighborhood.
-                        join_lookahead = float(np.clip(0.30 * dist_goal + 0.8, 1.6, 4.0))
-                        if strict_join:
-                            join_lookahead = float(min(join_lookahead, 3.2))
-                        tgt, _tgt_yaw = self._route_target_ahead(head_state, join_route, lookahead_m=float(join_lookahead))
-                        # If the computed target is still too close while the goal is far away,
-                        # extend lookahead once to avoid tight orbits.
-                        if dist_goal >= 2.0 and float(np.linalg.norm(tgt - head_state.xy())) < 0.75 and join_lookahead < 3.9:
-                            tgt, _tgt_yaw = self._route_target_ahead(
-                                head_state,
-                                join_route,
-                                lookahead_m=float(min(4.0, join_lookahead + 1.0)),
-                            )
-                        vec = tgt - head_state.xy()
-                        heading = np.array([math.cos(float(head_state.yaw)), math.sin(float(head_state.yaw))], dtype=float)
-                        behind = bool(float(np.dot(vec, heading)) < -0.15 and float(np.linalg.norm(vec)) > 0.35)
-                        if behind:
-                            if strict_join:
-                                cmd_backoff = self._gate_backoff_command(head_state)
-                                if cmd_backoff is not None:
-                                    nxt_back = self.ack.step(head_state, cmd_backoff, self.cfg.control.dt)
-                                    if not (self._collision_with_obstacles_fast(nxt_back) or self._collision_with_others_fast(nxt_back, others)):
-                                        self._store_cmd(head, cmd_backoff, now)
-                                        self.states[head] = nxt_back
-                                        self._blocked_ticks[head] = 0
-                                        updated.add(head)
-                                        continue
-                            # If the lookahead point is behind the vehicle, a short-horizon sampled
-                            # local planner can choose a "do nothing" command due to limited progress
-                            # in 0.6s horizons at low speed. Use a point-attractor controller to
-                            # deterministically steer toward the target and keep the join route moving.
-                            cmd_pt = self.tracker.track_point(
-                                head_state,
-                                float(tgt[0]),
-                                float(tgt[1]),
-                                float(_tgt_yaw),
-                                float(join_speed),
-                            )
-                            cmd_join = ControlCommand(
-                                accel=float(self._speed_accel_cmd(head_state.v, join_speed)),
-                                steer_rate=float(cmd_pt.steer_rate),
-                            )
-                            cmd_join = self._enforce_speed_cap(head_state, cmd_join, join_speed, allow_reverse=False)
-                            nxt_join = self.ack.step(head_state, cmd_join, self.cfg.control.dt)
-                            if self._collision_with_obstacles_fast(nxt_join) or self._collision_with_others_fast(nxt_join, others):
-                                cmd_join = self._stop_command(head_state)
-                                nxt_join = self._freeze_state(head_state)
-                            self._store_cmd(head, cmd_join, now)
-                            self.states[head] = nxt_join
-                            self._blocked_ticks[head] = 0
-                            updated.add(head)
-                            continue
-                        # Forward tracking along join-route.
-                        # Use pure-pursuit for A* routes: Stanley can saturate at large cross-track
-                        # errors and drive yaw toward ±90deg, stalling x-progress near cross-walls.
-                        dt = float(self.cfg.control.dt)
-                        max_rate = math.radians(self.cfg.vehicle.max_steer_rate_deg_s)
-                        dmax = math.radians(self.cfg.vehicle.max_steer_deg)
-                        vec_pp = tgt - head_state.xy()
-                        alpha_pp = float(angle_diff(float(math.atan2(float(vec_pp[1]), float(vec_pp[0]))), float(head_state.yaw)))
-                        ld_pp = float(max(1e-3, np.linalg.norm(vec_pp)))
-                        delta_ref = float(math.atan2(2.0 * float(self.cfg.vehicle.wheelbase) * math.sin(alpha_pp), ld_pp))
-                        delta_ref = float(np.clip(delta_ref, -dmax, dmax))
-                        steer_rate = float(np.clip((delta_ref - float(head_state.delta)) / max(dt, 1e-6), -max_rate, max_rate))
+                        # If the lookahead point is behind the vehicle, a short-horizon sampled
+                        # local planner can choose a "do nothing" command due to limited progress
+                        # in 0.6s horizons at low speed. Use a point-attractor controller to
+                        # deterministically steer toward the target and keep the join route moving.
+                        cmd_pt = self.tracker.track_point(
+                            head_state,
+                            float(tgt[0]),
+                            float(tgt[1]),
+                            float(_tgt_yaw),
+                            float(join_speed),
+                        )
                         cmd_join = ControlCommand(
                             accel=float(self._speed_accel_cmd(head_state.v, join_speed)),
-                            steer_rate=float(steer_rate),
+                            steer_rate=float(cmd_pt.steer_rate),
                         )
                         cmd_join = self._enforce_speed_cap(head_state, cmd_join, join_speed, allow_reverse=False)
                         nxt_join = self.ack.step(head_state, cmd_join, self.cfg.control.dt)
                         if self._collision_with_obstacles_fast(nxt_join) or self._collision_with_others_fast(nxt_join, others):
-                            # Strict gate-staging join routes can become kinematically infeasible when the
-                            # vehicle approaches the wall face outside the opening band (front hitch protrudes).
-                            # Instead of freezing until the join-route is dropped, apply a deterministic
-                            # back-off so the vehicle can regain turning room and continue climbing into the band.
-                            if strict_join:
-                                cmd_backoff = self._gate_backoff_command(head_state)
-                                if cmd_backoff is not None:
-                                    nxt_back = self.ack.step(head_state, cmd_backoff, dt)
-                                    if not (self._collision_with_obstacles_fast(nxt_back) or self._collision_with_others_fast(nxt_back, others)):
-                                        self._blocked_ticks[head] = 0
-                                        self._store_cmd(head, cmd_backoff, now)
-                                        self.states[head] = nxt_back
-                                        updated.add(head)
-                                        continue
-                            self._blocked_ticks[head] += 1
-                            cmd_stop = self._stop_command(head_state)
-                            self._store_cmd(head, cmd_stop, now)
-                            self.states[head] = self._freeze_state(head_state)
-                            # If the join route leads to immediate collision, drop it and replan later.
-                            if self._blocked_ticks[head] >= 12:
-                                self._join_route_xy.pop(int(head), None)
-                                self._join_route_goal_xy.pop(int(head), None)
-                                self._join_route_strict_goal.pop(int(head), None)
-                            updated.add(head)
-                            continue
-
-                        self._blocked_ticks[head] = 0
+                            cmd_join = self._stop_command(head_state)
+                            nxt_join = self._freeze_state(head_state)
                         self._store_cmd(head, cmd_join, now)
                         self.states[head] = nxt_join
+                        self._blocked_ticks[head] = 0
                         updated.add(head)
                         continue
+                    # Forward tracking along join-route.
+                    # Use pure-pursuit for A* routes: Stanley can saturate at large cross-track
+                    # errors and drive yaw toward ±90deg, stalling x-progress near cross-walls.
+                    dt = float(self.cfg.control.dt)
+                    max_rate = math.radians(self.cfg.vehicle.max_steer_rate_deg_s)
+                    dmax = math.radians(self.cfg.vehicle.max_steer_deg)
+                    vec_pp = tgt - head_state.xy()
+                    alpha_pp = float(
+                        angle_diff(float(math.atan2(float(vec_pp[1]), float(vec_pp[0]))), float(head_state.yaw))
+                    )
+                    ld_pp = float(max(1e-3, np.linalg.norm(vec_pp)))
+                    delta_ref = float(math.atan2(2.0 * float(self.cfg.vehicle.wheelbase) * math.sin(alpha_pp), ld_pp))
+                    delta_ref = float(np.clip(delta_ref, -dmax, dmax))
+                    steer_rate = float(
+                        np.clip((delta_ref - float(head_state.delta)) / max(dt, 1e-6), -max_rate, max_rate)
+                    )
+                    cmd_join = ControlCommand(
+                        accel=float(self._speed_accel_cmd(head_state.v, join_speed)),
+                        steer_rate=float(steer_rate),
+                    )
+                    cmd_join = self._enforce_speed_cap(head_state, cmd_join, join_speed, allow_reverse=False)
+                    nxt_join = self.ack.step(head_state, cmd_join, self.cfg.control.dt)
+                    hit_obs_join = self._collision_with_obstacles_fast(nxt_join)
+                    hit_veh_join = self._collision_with_others_fast(nxt_join, others)
+                    if hit_obs_join or hit_veh_join:
+                        # Strict gate-staging join routes can become kinematically infeasible when the
+                        # vehicle approaches the wall face outside the opening band (front hitch protrudes).
+                        # Instead of freezing until the join-route is dropped, apply a deterministic
+                        # back-off so the vehicle can regain turning room and continue climbing into the band.
+                        if strict_join:
+                            cmd_backoff = self._gate_backoff_command(head_state)
+                            if cmd_backoff is not None:
+                                nxt_back = self.ack.step(head_state, cmd_backoff, dt)
+                                if not (
+                                    self._collision_with_obstacles_fast(nxt_back)
+                                    or self._collision_with_others_fast(nxt_back, others)
+                                ):
+                                    self._blocked_ticks[head] = 0
+                                    self._store_cmd(head, cmd_backoff, now)
+                                    self.states[head] = nxt_back
+                                    updated.add(head)
+                                    continue
+                        # Generic join-route backoff:
+                        # If the forward preview collides (often at obstacle corners), create a bit of
+                        # longitudinal room by reversing while steering to reduce heading error to the
+                        # join-route target. This avoids getting stuck with v=0 where yaw cannot change.
+                        if abs(float(head_state.v)) <= 0.12 and int(self._blocked_ticks.get(head, 0)) >= 2:
+                            vec_to_tgt = tgt - head_state.xy()
+                            yaw_tgt = float(math.atan2(float(vec_to_tgt[1]), float(vec_to_tgt[0])))
+                            yaw_err = float(angle_diff(yaw_tgt, float(head_state.yaw)))
+                            steer_sign = -1.0 if yaw_err > 1e-6 else (1.0 if yaw_err < -1e-6 else 0.0)
+                            delta_target = float(np.clip(steer_sign * 0.55, -dmax, dmax))
+                            steer_rate_bk = float(np.clip((delta_target - float(head_state.delta)) / max(dt, 1e-6), -max_rate, max_rate))
+                            v_ref = -0.25
+                            accel_bk = float(
+                                np.clip(
+                                    (v_ref - float(head_state.v)) / max(dt, 1e-6),
+                                    -self.cfg.vehicle.max_decel,
+                                    self.cfg.control.speed.max_accel_cmd,
+                                )
+                            )
+                            cmd_bk = ControlCommand(accel=accel_bk, steer_rate=steer_rate_bk)
+                            cmd_bk = self._enforce_speed_cap(head_state, cmd_bk, 0.0, allow_reverse=True)
+                            nxt_bk = self.ack.step(head_state, cmd_bk, dt)
+                            if (not self._collision_with_obstacles_fast(nxt_bk)) and (
+                                not self._collision_with_others_fast(nxt_bk, others)
+                            ):
+                                self._blocked_ticks[head] = 0
+                                self._store_cmd(head, cmd_bk, now)
+                                self.states[head] = nxt_bk
+                                updated.add(head)
+                                continue
+                        # Join-route collision fallback:
+                        # A purely geometric A* polyline can be kinematically infeasible near obstacle
+                        # corners. When the one-step pure-pursuit preview is blocked, try the sampled
+                        # local planner to find a feasible short-horizon motion toward the join target.
+                        plan_join = self.gate_planner.plan_step(
+                            ego=head_state,
+                            goal_xy=tgt,
+                            goal_yaw=float(_tgt_yaw),
+                            obstacles=self.case.obstacles,
+                            dynamic_others=others,
+                            force_goal_yaw=False,
+                        )
+                        if plan_join.feasible:
+                            cmd_alt = plan_join.command
+                            # Keep forward speed intent when planner is not explicitly braking/reversing.
+                            if float(cmd_alt.accel) >= -1e-9:
+                                cmd_alt = ControlCommand(
+                                    accel=float(self._speed_accel_cmd(head_state.v, join_speed)),
+                                    steer_rate=float(cmd_alt.steer_rate),
+                                )
+                            allow_reverse = bool(float(cmd_alt.accel) < -1e-9)
+                            cmd_alt = self._enforce_speed_cap(head_state, cmd_alt, join_speed, allow_reverse=allow_reverse)
+                            nxt_alt = self.ack.step(head_state, cmd_alt, self.cfg.control.dt)
+                            if (not self._collision_with_obstacles_fast(nxt_alt)) and (
+                                not self._collision_with_others_fast(nxt_alt, others)
+                            ):
+                                moved = float(np.linalg.norm(nxt_alt.xy() - head_state.xy()))
+                                # Only accept the fallback when it makes meaningful progress toward the join goal.
+                                # Otherwise the vehicle can get stuck accepting tiny oscillations forever.
+                                d_after = float(np.linalg.norm(nxt_alt.xy() - join_goal)) if join_goal is not None else float(dist_goal)
+                                progress = float(dist_goal - d_after)
+                                if (moved > 0.001) and (progress > 0.005):
+                                    self._blocked_ticks[head] = 0
+                                    self._store_cmd(head, cmd_alt, now)
+                                    self.states[head] = nxt_alt
+                                    updated.add(head)
+                                    continue
+                        self._blocked_ticks[head] += 1
+                        cmd_stop = self._stop_command(head_state)
+                        self._store_cmd(head, cmd_stop, now)
+                        self.states[head] = self._freeze_state(head_state)
+                        # If the join route leads to immediate collision, drop it and replan later.
+                        if self._blocked_ticks[head] >= 12:
+                            self._join_route_xy.pop(int(head), None)
+                            self._join_route_goal_xy.pop(int(head), None)
+                            self._join_route_strict_goal.pop(int(head), None)
+                        updated.add(head)
+                        continue
+
+                    self._blocked_ticks[head] = 0
+                    self._store_cmd(head, cmd_join, now)
+                    self.states[head] = nxt_join
+                    updated.add(head)
+                    continue
 
             # Gate-stall rescue: for multi-gate chicanes (Type-C) and serial bottlenecks (B3),
             # vehicles can get stuck in near-vertical yaw oscillations right before the wall face.
@@ -3207,7 +3799,9 @@ class IntegratedP2P4Runner:
             # corridor (low lateral error); otherwise the leader can unnecessarily reverse near
             # the first gate because the reference path does not enter the gap band until close
             # to the wall face. We only allow escape when the vehicle is clearly off-corridor.
-            if self.demo_cfg.enable_gate_escape and (str(self.case.subtype).startswith("C") or str(self.case.subtype) == "B3"):
+            if self.demo_cfg.enable_gate_escape and (
+                str(self.case.subtype).startswith("C") or str(self.case.subtype) in {"B2", "B3"}
+            ):
                 escape_active = bool(int(head) in self._gate_escape_phase or int(head) in self._gate_escape_key)
                 if escape_active:
                     cmd_escape = self._gate_escape_command(head_state)
@@ -3241,9 +3835,11 @@ class IntegratedP2P4Runner:
                 # Gate assists are intended as *recovery* behaviors. Running the full gate-mode
                 # controller all the time can create oscillations and timeouts (B1/B3). Prefer
                 # the nominal corridor tracker unless we are actually stuck near a wall.
-                cmd_backoff = None
-                if int(self._blocked_ticks.get(head, 0)) >= 3:
-                    cmd_backoff = self._gate_backoff_command(head_state)
+                # Emergency back-off should be purely geometry-triggered (front hitch near the
+                # wall face while outside the opening band). Do not gate it on blocked_ticks:
+                # in many failures the vehicle never accumulates blocked ticks because it keeps
+                # oscillating with tiny collision-free steps.
+                cmd_backoff = self._gate_backoff_command(head_state)
                 if cmd_backoff is not None:
                     dt = float(self.cfg.control.dt)
                     nxt_back = self.ack.step(head_state, cmd_backoff, dt)
@@ -3256,25 +3852,33 @@ class IntegratedP2P4Runner:
                     self._blocked_ticks[head] = 0
                     continue
 
-                if self.demo_cfg.enable_gate_mode:
-                    # Only engage the gate-mode controller when the vehicle is already near/inside
-                    # the wall thickness. For multi-gate chicanes (Type-C), engaging too early can
-                    # force an overly aggressive lane-change toward the next gate gap and drive yaw
-                    # toward ±90deg, stalling x-progress between walls.
-                    if active_gate is not None:
-                        x0_face = float(active_gate.get("x0", float(active_gate.get("cx", 0.0)) - 0.2))
-                        x1_face = float(active_gate.get("x1", float(active_gate.get("cx", 0.0)) + 0.2))
-                        y0_face = float(active_gate.get("y0", float(active_gate.get("cy", 0.0)) - 0.2))
-                        y1_face = float(active_gate.get("y1", float(active_gate.get("cy", 0.0)) + 0.2))
-                        if y1_face < y0_face:
-                            y0_face, y1_face = y1_face, y0_face
-                        nose_x = float(self.geom.to_world(head_state, float(self.geom.front_x))[0])
-                        tail_x = float(self.geom.to_world(head_state, float(self.geom.rear_x))[0])
-                        near_face = bool(nose_x >= (x0_face - 0.60))
-                        y_near_gap = bool((y0_face - 0.12) <= float(head_state.y) <= (y1_face + 0.12))
-                        not_cleared = bool(tail_x <= (x1_face + 0.60))
-                        if near_face and y_near_gap and not_cleared:
-                            gate_goal = self._gate_traversal_goal(head_state, target_speed)
+                # Gate-mode assist (auto-engage when needed):
+                # - The cross-wall collision-critical point is the *front hitch*, not only the
+                #   front bumper. If we wait until `front_x` is near the wall face, the hitch
+                #   may already collide and the vehicle never reaches the engagement window.
+                # - Keep the original `enable_gate_mode` flag as an always-on switch, but also
+                #   auto-enable when we are close to the wall face or have been blocked recently.
+                if active_gate is not None:
+                    x0_face = float(active_gate.get("x0", float(active_gate.get("cx", 0.0)) - 0.2))
+                    x1_face = float(active_gate.get("x1", float(active_gate.get("cx", 0.0)) + 0.2))
+                    y0_face = float(active_gate.get("y0", float(active_gate.get("cy", 0.0)) - 0.2))
+                    y1_face = float(active_gate.get("y1", float(active_gate.get("cy", 0.0)) + 0.2))
+                    if y1_face < y0_face:
+                        y0_face, y1_face = y1_face, y0_face
+                    hitch_x = float(self.geom.front_hitch(head_state)[0])
+                    tail_x = float(self.geom.to_world(head_state, float(self.geom.rear_x))[0])
+                    y_near_gap = bool((y0_face - 0.12) <= float(head_state.y) <= (y1_face + 0.12))
+                    not_cleared = bool(tail_x <= (x1_face + 0.60))
+
+                    engage = bool(self.demo_cfg.enable_gate_mode)
+                    if int(self._blocked_ticks.get(head, 0)) >= 1:
+                        engage = True
+                    # Engage earlier based on front hitch proximity to the wall face.
+                    if hitch_x >= (x0_face - 0.75):
+                        engage = True
+
+                    if engage and y_near_gap and not_cleared:
+                        gate_goal = self._gate_traversal_goal(head_state, target_speed)
 
             if gate_goal is not None:
                 p_gate, yaw_gate, v_gate = gate_goal
@@ -3362,11 +3966,17 @@ class IntegratedP2P4Runner:
                 corridor = np.stack([head_state.xy(), p_gate, p2], axis=0)
                 lat_err_gate = float(abs(float(p_gate[1]) - float(head_state.y)))
                 yaw_err_gate = float(abs(angle_diff(float(yaw_gate), float(head_state.yaw))))
+                goal_behind = bool(float(p_gate[0]) < float(head_state.x) - 0.05)
                 use_sampling = bool(
                     int(self._blocked_ticks.get(head, 0)) >= 6
                     or lat_err_gate >= 0.65
                     or yaw_err_gate >= math.radians(45.0)
                 )
+                # If the gate target is behind (back-off goal), do not use the forward-only fast
+                # corridor tracker; it will command forward motion and can induce long oscillation
+                # stalls at the wall face (B3 Clustered_At_A seed=50042).
+                if goal_behind:
+                    use_sampling = True
                 if not use_sampling:
                     gate_tracker = self.tracker if abs(float(head_state.v)) < 0.35 else self.nav_tracker
                     cmd_pp = gate_tracker.track_path(head_state, corridor, float(v_gate))
@@ -3384,7 +3994,6 @@ class IntegratedP2P4Runner:
                         continue
                     self._blocked_ticks[head] += 1
 
-                goal_behind = bool(float(p_gate[0]) < float(head_state.x) - 0.05)
                 force_yaw = bool(float(np.linalg.norm(head_state.xy() - p_gate)) <= 1.8)
                 plan_gate = self.gate_planner.plan_step(
                     ego=head_state,
@@ -3397,12 +4006,13 @@ class IntegratedP2P4Runner:
                 if plan_gate.feasible:
                     cmd_gate = plan_gate.command
                 else:
+                    v_ref = float(-abs(float(v_gate)) if goal_behind else float(v_gate))
                     cmd_gate = self.tracker.track_point(
                         head_state,
                         float(p_gate[0]),
                         float(p_gate[1]),
                         float(yaw_gate),
-                        float(v_gate),
+                        float(v_ref),
                     )
                 # Heuristic: the sampling planner can get "myopically stuck" with zero steer-rate
                 # near a gate approach when large yaw/lateral errors require an intermediate
@@ -3595,7 +4205,13 @@ class IntegratedP2P4Runner:
                 # near-vertical yaw oscillations before the first gate. Use pure-pursuit until the
                 # lateral error is reduced, then switch back to Stanley for precision.
                 lat_err = float(self._lateral_distance_to_path(head_state, track_path))
-                ctrl = self.tracker if (self.mandatory_gates and lat_err >= 0.90) else self.nav_tracker
+                prefer_pp = bool(self.mandatory_gates and lat_err >= 0.90)
+                # Type-B2 is a two-gate chicane-like scene; Stanley can keep flipping near the
+                # wall-pair lane-change region and dominate P6 completion time. Prefer the more
+                # stable pure-pursuit tracker there.
+                if self.mandatory_gates and str(self.case.subtype) == "B2":
+                    prefer_pp = True
+                ctrl = self.tracker if prefer_pp else self.nav_tracker
                 cmd = ctrl.track_path(head_state, track_path, target_speed)
             # Use explicit speed control to avoid tracker-induced stalls/oscillations in wide-open regions.
             cmd = ControlCommand(
@@ -3612,7 +4228,11 @@ class IntegratedP2P4Runner:
                 # attempt a slow straight creep forward (unwinding steering) to increase the gap.
                 # If the collision is with a vehicle ahead, attempt a short reverse back-off.
                 if hit_veh and (not hit_obs):
-                    colliders = [o for o in others if self.collision.collide_vehicle_vehicle(nxt, o, include_clearance=False)]
+                    # IMPORTANT: `hit_veh` includes clearance violations (min_clearance). If we only
+                    # test raw polygon intersection here, side-by-side near-contacts will not be
+                    # classified as colliders and the deadlock breaker won't trigger (P6 B3/C*
+                    # Clustered_At_A stalls).
+                    colliders = [o for o in others if self.collision.collide_vehicle_vehicle(nxt, o, include_clearance=True)]
                     if colliders:
                         colliders.sort(key=lambda o: float(np.linalg.norm(head_state.xy() - o.xy())))
                         c = colliders[0]
@@ -4042,8 +4662,8 @@ class IntegratedP2P4Runner:
                     goal_s = float("nan")
                 if math.isfinite(goal_s):
                     cur_s = float(self._path_progress_s(self.states[int(h)]))
-                    lat = float(self._lateral_distance_to_path(self.states[int(h)]))
-                    if (cur_s >= goal_s - 0.20) and (lat <= 0.90):
+                    lat = float(self._lateral_distance_to_path(self.states[int(h)], self._track_path_xy(int(h))))
+                    if (cur_s >= goal_s - 0.20) and (lat <= 1.25):
                         ok = True
             head_goal_ok[int(h)] = bool(ok)
         for vid in self.vehicle_ids:

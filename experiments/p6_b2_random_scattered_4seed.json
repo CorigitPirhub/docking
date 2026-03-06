@@ -1,0 +1,222 @@
+{
+  "config": {
+    "duration_s": 60.0,
+    "leader_target_speed": 1.25,
+    "free_target_speed": 1.25,
+    "n_vehicles": 2,
+    "base_seed": 42,
+    "seeds_per_subtype": 4,
+    "subtypes": [
+      "B2"
+    ],
+    "dispersion_modes": [
+      "Random_Scattered"
+    ],
+    "inject_disturbance": false,
+    "enable_sensor_noise": false,
+    "total_runs": 4,
+    "policy_specs": [
+      {
+        "policy_id": "integrated_split_priority",
+        "policy": "integrated",
+        "conflict_policy": "split_priority"
+      }
+    ]
+  },
+  "thresholds": {
+    "success_rate_min": 0.95,
+    "done_within_60_rate_min": 0.9,
+    "feasibility_accuracy_min": 0.9,
+    "collision_total_max": 0
+  },
+  "aggregates": {
+    "integrated_split_priority": {
+      "policy_id": "integrated_split_priority",
+      "num_runs": 4,
+      "success_rate": 0.5,
+      "done_within_60_rate": 0.5,
+      "collision_total": 0,
+      "avg_done_time_s": 46.68750000000012,
+      "avg_energy": 44.24010937936789,
+      "feasibility_accuracy": 1.0,
+      "feasibility_samples": 0
+    }
+  },
+  "subtype_breakdown": {
+    "integrated_split_priority": {
+      "B2": {
+        "policy_id": "B2",
+        "num_runs": 4,
+        "success_rate": 0.5,
+        "done_within_60_rate": 0.5,
+        "collision_total": 0,
+        "avg_done_time_s": 46.68750000000012,
+        "avg_energy": 44.24010937936789,
+        "feasibility_accuracy": 1.0,
+        "feasibility_samples": 0
+      }
+    }
+  },
+  "comparisons": {},
+  "pass_flags": {
+    "success_rate": false,
+    "done_within_60_rate": false,
+    "feasibility_accuracy": true,
+    "collision_total": true
+  },
+  "gate6_ready": false,
+  "failure_cases": [
+    {
+      "policy_id": "integrated_split_priority",
+      "scenario_id": "B2_seed42_n2_Random_Scattered",
+      "subtype": "B2",
+      "seed": 42,
+      "dispersion_mode": "Random_Scattered",
+      "reason": "timeout_or_unfinished",
+      "done_time_s": 60.0,
+      "collision_count": 0,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "feasibility_abort_count": 0,
+      "events_count": {},
+      "pending_snapshots": 0
+    },
+    {
+      "policy_id": "integrated_split_priority",
+      "scenario_id": "B2_seed45_n2_Random_Scattered",
+      "subtype": "B2",
+      "seed": 45,
+      "dispersion_mode": "Random_Scattered",
+      "reason": "timeout_or_unfinished",
+      "done_time_s": 60.0,
+      "collision_count": 0,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "feasibility_abort_count": 0,
+      "events_count": {},
+      "pending_snapshots": 0
+    }
+  ],
+  "runs": [
+    {
+      "scenario_id": "B2_seed42_n2_Random_Scattered",
+      "subtype": "B2",
+      "policy": "integrated",
+      "conflict_policy": "split_priority",
+      "enable_sensor_noise": false,
+      "success": false,
+      "done_within_60": false,
+      "done_time_s": 60.0,
+      "total_energy": 26.08688289422343,
+      "collision_count": 0,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "p4_interruption_count": 0,
+      "p4_replan_success_count": 0,
+      "p4_abort_to_independent_count": 0,
+      "feasibility_abort_count": 0,
+      "leader_final_train_size": 1,
+      "commands_submitted": 0,
+      "commands_accepted": 0,
+      "command_exec_accept": 0,
+      "command_exec_reject": 0,
+      "command_exec_rate": 1.0,
+      "feasibility_correct": 0,
+      "feasibility_total": 0,
+      "policy_id": "integrated_split_priority",
+      "seed": 42,
+      "dispersion_mode": "Random_Scattered",
+      "n_vehicles": 2
+    },
+    {
+      "scenario_id": "B2_seed43_n2_Random_Scattered",
+      "subtype": "B2",
+      "policy": "integrated",
+      "conflict_policy": "split_priority",
+      "enable_sensor_noise": false,
+      "success": true,
+      "done_within_60": true,
+      "done_time_s": 34.000000000000206,
+      "total_energy": 63.084491467537084,
+      "collision_count": 0,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "p4_interruption_count": 0,
+      "p4_replan_success_count": 0,
+      "p4_abort_to_independent_count": 0,
+      "feasibility_abort_count": 0,
+      "leader_final_train_size": 1,
+      "commands_submitted": 0,
+      "commands_accepted": 0,
+      "command_exec_accept": 0,
+      "command_exec_reject": 0,
+      "command_exec_rate": 1.0,
+      "feasibility_correct": 0,
+      "feasibility_total": 0,
+      "policy_id": "integrated_split_priority",
+      "seed": 43,
+      "dispersion_mode": "Random_Scattered",
+      "n_vehicles": 2
+    },
+    {
+      "scenario_id": "B2_seed44_n2_Random_Scattered",
+      "subtype": "B2",
+      "policy": "integrated",
+      "conflict_policy": "split_priority",
+      "enable_sensor_noise": false,
+      "success": true,
+      "done_within_60": true,
+      "done_time_s": 32.75000000000028,
+      "total_energy": 63.040106069741775,
+      "collision_count": 0,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "p4_interruption_count": 0,
+      "p4_replan_success_count": 0,
+      "p4_abort_to_independent_count": 0,
+      "feasibility_abort_count": 0,
+      "leader_final_train_size": 1,
+      "commands_submitted": 0,
+      "commands_accepted": 0,
+      "command_exec_accept": 0,
+      "command_exec_reject": 0,
+      "command_exec_rate": 1.0,
+      "feasibility_correct": 0,
+      "feasibility_total": 0,
+      "policy_id": "integrated_split_priority",
+      "seed": 44,
+      "dispersion_mode": "Random_Scattered",
+      "n_vehicles": 2
+    },
+    {
+      "scenario_id": "B2_seed45_n2_Random_Scattered",
+      "subtype": "B2",
+      "policy": "integrated",
+      "conflict_policy": "split_priority",
+      "enable_sensor_noise": false,
+      "success": false,
+      "done_within_60": false,
+      "done_time_s": 60.0,
+      "total_energy": 24.74895708596925,
+      "collision_count": 0,
+      "dock_success_count": 0,
+      "split_count": 0,
+      "p4_interruption_count": 0,
+      "p4_replan_success_count": 0,
+      "p4_abort_to_independent_count": 0,
+      "feasibility_abort_count": 0,
+      "leader_final_train_size": 1,
+      "commands_submitted": 0,
+      "commands_accepted": 0,
+      "command_exec_accept": 0,
+      "command_exec_reject": 0,
+      "command_exec_rate": 1.0,
+      "feasibility_correct": 0,
+      "feasibility_total": 0,
+      "policy_id": "integrated_split_priority",
+      "seed": 45,
+      "dispersion_mode": "Random_Scattered",
+      "n_vehicles": 2
+    }
+  ]
+}
