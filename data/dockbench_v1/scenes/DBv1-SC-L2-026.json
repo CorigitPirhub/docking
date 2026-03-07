@@ -1,0 +1,168 @@
+{
+  "schema_version": "dockbench-v1.0",
+  "scene_id": "DBv1-SC-L2-026",
+  "split": "tuning",
+  "family": "SC",
+  "difficulty": "L2",
+  "generator_version": "dock_sgen_1.0",
+  "max_time_s": 28.0,
+  "map": {
+    "width_m": 40.0,
+    "height_m": 20.0,
+    "resolution_m": 0.05
+  },
+  "leader": {
+    "x": 5.235775603255687,
+    "y": 0.1336766409825474,
+    "yaw": -0.2466065670527308
+  },
+  "follower": {
+    "x": -2.998894141864951,
+    "y": 2.194646103893017,
+    "yaw": -0.12209140468481643
+  },
+  "obstacles": [
+    {
+      "x": 1.1495991565673442,
+      "y": 0.5893987215352706,
+      "width": 0.62,
+      "height": 1.4200000000000002,
+      "yaw": -0.24524175452115862,
+      "role": "screen"
+    },
+    {
+      "x": -5.699812666123471,
+      "y": 5.699292714899922,
+      "width": 1.1508312445016906,
+      "height": 1.2471338006654191,
+      "yaw": -0.2805724321777868,
+      "role": "background"
+    },
+    {
+      "x": 10.364770240226594,
+      "y": 2.345048801183305,
+      "width": 0.8259278255560346,
+      "height": 1.1637273904730936,
+      "yaw": -0.5598160620008307,
+      "role": "background"
+    }
+  ],
+  "descriptors": {
+    "d0_m": 6.898805690621339,
+    "heading_diff_deg": 7.134193289067667,
+    "bearing_deg": -179.92180200211433,
+    "boundary_margin_m": 7.805353896106983,
+    "clutter_ratio": 0.004095994221291685,
+    "occlusion_index": 1.0,
+    "detour_factor": 1.1148,
+    "homotopy_count": 2.0,
+    "dock_zone_clearance_m": 0.8563556493380714,
+    "staging_shift_required_m": 0.264,
+    "capture_constraint_index": 0.16030600315822013
+  },
+  "quality": {
+    "valid": true,
+    "label_fidelity": true,
+    "diversity_score": 1.0,
+    "balance_score": 0.8333333333333334,
+    "scene_quality_score": 0.95,
+    "raw_diversity_distance": 0.3540020914598722
+  },
+  "audit": {
+    "direct_los_blocked": true,
+    "large_obstacle_present": false,
+    "stage_plan": {
+      "leader_goal": {
+        "vehicle_id": 2,
+        "x": 5.491788650255417,
+        "y": 0.06923038611918465,
+        "yaw": -0.2466065670527308,
+        "v": 0.0,
+        "delta": 0.0,
+        "mode": "FREE"
+      },
+      "follower_goal": {
+        "vehicle_id": 1,
+        "x": 2.85989694738697,
+        "y": 0.731757415282694,
+        "yaw": -0.2466065670527308,
+        "v": 0.0,
+        "delta": 0.0,
+        "mode": "DOCKING"
+      },
+      "leader_path_xy": [
+        [
+          5.235775603255687,
+          0.1336766409825474
+        ],
+        [
+          5.491788650255417,
+          0.06923038611918465
+        ]
+      ],
+      "follower_path_xy": [
+        [
+          -2.998894141864951,
+          2.194646103893017
+        ],
+        [
+          2.85989694738697,
+          0.731757415282694
+        ]
+      ],
+      "score": 1.3788,
+      "reason": "heuristic_descriptor_estimate"
+    }
+  },
+  "scenario": {
+    "seed": 20370454,
+    "style": "switching_critical",
+    "planner_seed": 20370551,
+    "obstacles": [
+      {
+        "x": 1.1495991565673442,
+        "y": 0.5893987215352706,
+        "width": 0.62,
+        "height": 1.4200000000000002,
+        "yaw": -0.24524175452115862
+      },
+      {
+        "x": -5.699812666123471,
+        "y": 5.699292714899922,
+        "width": 1.1508312445016906,
+        "height": 1.2471338006654191,
+        "yaw": -0.2805724321777868
+      },
+      {
+        "x": 10.364770240226594,
+        "y": 2.345048801183305,
+        "width": 0.8259278255560346,
+        "height": 1.1637273904730936,
+        "yaw": -0.5598160620008307
+      }
+    ],
+    "leader": {
+      "vehicle_id": 2,
+      "x": 5.235775603255687,
+      "y": 0.1336766409825474,
+      "yaw": -0.2466065670527308,
+      "v": 0.0,
+      "delta": 0.0,
+      "mode": "FREE"
+    },
+    "follower": {
+      "vehicle_id": 1,
+      "x": -2.998894141864951,
+      "y": 2.194646103893017,
+      "yaw": -0.12209140468481643,
+      "v": 0.0,
+      "delta": 0.0,
+      "mode": "DOCKING"
+    },
+    "leader_relocation_m": 0.264,
+    "follower_detour_ratio": 1.1148,
+    "direct_los_blocked": true,
+    "large_obstacle_present": false,
+    "subset_tag": "Switching-Critical"
+  }
+}

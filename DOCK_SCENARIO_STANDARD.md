@@ -331,6 +331,15 @@ D(s)=0.15\tilde d_0 + 0.15\widetilde{|\Delta \psi_0|} + 0.20\tilde O_{occ} + 0.2
 - `dockbench_v1_split_test.json`
 - `dockbench_v1_split_challenge.json`
 - `dockbench_v1_quality_report.json`
+- `dockbench_v1_representatives.json`
+- `dockbench_v1_split_freeze_summary.json`
+
+当前仓库中的推荐落地路径为 `data/dockbench_v1/`，并采用三步式脚本化流程：
+- 生成候选集：`scripts/generate_dockbench_v1.py`
+- 基于基础支撑闭环审计冻结 split：`scripts/freeze_dockbench_v1_splits.py`
+- 对 frozen tuning split 做 Stage-0 验证：`scripts/validate_dockbench_stage0.py`
+
+为兼容现有 Stage-1 运行时，单场景 JSON 顶层保留 benchmark 元数据，同时在 `scenario` 字段内嵌一份可直接被 `scripts/run_p_minus1_stage1_docking.py` 读取的运行时 payload。
 
 ---
 
@@ -358,10 +367,15 @@ Q_{struct}(s)=G_{valid}(s)G_{label}(s)\Big(\lambda_{div}Q_{div}(s)+\lambda_{bal}
 ### B. 闭环审计评估（support-aware audit）
 
 不是用来“挑对自己有利的 test scene”，而是用来确认 family 标签真的打到了对应机制：
-- `CF / SC / FC`：至少 1 个强传统基线在对应 tuning cell 中应有非零成功率；
+- `CF / SC / FC`：至少 1 个强传统基线在对应 tuning family 中应有非零成功率；
 - `EC`：leader 初始位姿应确实存在明显 dockability gap，且 cooperative staging 可显著降低 gap；
 - `SC`：应观测到视觉有效率/回退频率显著非零；
 - `FC`：应观测到近场停滞/回退/微机动需求显著高于 `CF`。
+
+当前仓库的落地口径（`2026-03-06`）进一步明确为：
+- Stage-0 tuning cell 必须满足 `label_match + co_success + family-specific mechanism checks`；
+- `SC / FC` 的 family 证据允许采用 **response-regime** 形式，即 `fallback / visual_loss / time-cost` 的显著上升，而不强求每个 representative 都必须出现 hard-fail ablation；
+- representative readiness 也是 Stage-0 的正式组成部分：`CF_L2 / SC_L2 / FC_L2 / EC_L2` 必须来自 frozen `test` split 且可被 Stage-1 直接调用。
 
 ## 10.2 推荐的质量描述子向量
 
@@ -383,15 +397,21 @@ Q_{div}(s)=\min_{s'\in \mathcal D_{cell}}\|W(\chi(s)-\chi(s'))\|_2
 ## 11. DockBench-v1 的生成策略：不是纯随机，而是“生成 + 筛选 + 冻结”
 
 推荐流程：
-1. 先按 family/difficulty 的逻辑参数范围生成候选场景；
+1. 先按 family/difficulty 的逻辑参数范围生成 `6` 个候选 concrete scenes；
 2. 用结构质量评估器筛掉无效/重复/越界/标签不稳的场景；
-3. 对通过者做短程 foundation 审计；
-4. 仅把通过审计者写入 frozen split；
+3. 对同一 cell 内的全部候选场景做 support-aware audit，并按“co success / 强基线 success / family 机理信号 / 难度”综合打分；
+4. 依据审计结果冻结 `tuning / test / challenge`：优先把“最能证明 family 合法性”的样本放入 `tuning`，把“最硬但仍有价值”的样本放入 `challenge`；
 5. 一旦 split 冻结，P-1.2 只能读取，不得再改。
 
 这意味着：
 - 生成器可以是随机的；
 - **数据集本身必须是固定的**。
+
+当前仓库已经把这条流程固定为：
+1. `scripts/generate_dockbench_v1.py` 生成 `72` 个 concrete scenes；
+2. `scripts/freeze_dockbench_v1_splits.py` 基于 support-aware audit 冻结 `tuning / test / challenge`；
+3. `scripts/validate_dockbench_stage0.py` 对 frozen dataset 做 Stage-0 admission 审计；
+4. Stage-1 / Stage-2 只允许读取 `data/dockbench_v1/` 的 frozen manifest 与 representative。
 
 因此，问题 3 的答案是：**必须构建固定数据集，而不是每次实验重新随机出 test scenes。**
 

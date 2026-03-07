@@ -11,7 +11,7 @@ from .config import Config
 from .coop_docking import CooperativeStagingPlanner, StagingPlan, StagingTracker
 from .kinematics import AckermannModel, VehicleGeometry
 from .math_utils import angle_diff, clamp, wrap_angle
-from .sensors import GlobalPoseSensor, VisionSensor
+from .sensors import GlobalPoseSensor, VisionSensor, line_blocked_by_obstacles
 from .types import ControlCommand, Obstacle, VehicleState
 
 
@@ -49,6 +49,7 @@ class DockSkillOptions:
     enable_micro_replan: bool = True
     enable_fallback: bool = True
     enable_safety_projection: bool = True
+    enable_fast_lane: bool = True
 
 
 class CooperativeDockingSkill:
@@ -109,6 +110,8 @@ class CooperativeDockingSkill:
         self._dock_best_tail = float("inf")
         self._dock_stall_time = 0.0
         self._replan_count = 0
+        self._fast_lane_certified = False
+        self._fast_lane_certified = False
 
         self._bcfd_cfg = BCFDConfig()
 
@@ -169,6 +172,33 @@ class CooperativeDockingSkill:
             return plan
         return static_plan
 
+    def _dock_zone_clearance(self, leader_state: VehicleState) -> float:
+        heading = np.array([math.cos(float(leader_state.yaw)), math.sin(float(leader_state.yaw))], dtype=float)
+        rear = self.geom.rear_hitch(leader_state)
+        clearances: list[float] = []
+        for standoff in (0.30, 0.55, 0.80):
+            center = rear - heading * float(self.geom.front_hitch_x + float(standoff))
+            probe = VehicleState(vehicle_id=-1, x=float(center[0]), y=float(center[1]), yaw=float(leader_state.yaw), v=0.0, delta=0.0)
+            clearances.append(float(self.collision.min_clearance_vehicle_obstacles(probe, self.obstacles)))
+        return float(min(clearances) if clearances else 1e6)
+
+    def _compute_fast_lane_certificate(self, *, leader_ref: VehicleState, follower_ref: VehicleState) -> bool:
+        if not self.options.enable_fast_lane:
+            return False
+        if self._leader_goal is None or self._follower_goal is None:
+            return False
+        if self._leader_relocated:
+            return False
+        if abs(float(angle_diff(float(leader_ref.yaw), float(follower_ref.yaw)))) > math.radians(12.0):
+            return False
+        if line_blocked_by_obstacles(self.geom.front_hitch(follower_ref), self.geom.rear_hitch(leader_ref), self.obstacles):
+            return False
+        if float(self.collision.min_clearance_vehicle_obstacles(leader_ref, self.obstacles)) < 0.9:
+            return False
+        if float(self.collision.min_clearance_vehicle_obstacles(follower_ref, self.obstacles)) < 0.9:
+            return False
+        return self._dock_zone_clearance(self._leader_goal) >= 1.35
+
     def _apply_plan(self, plan: StagingPlan, *, leader_ref: VehicleState | None = None) -> None:
         self._plan = plan
         self._leader_goal = plan.leader_goal.copy()
@@ -179,6 +209,7 @@ class CooperativeDockingSkill:
         ref = self._leader_init if leader_ref is None else leader_ref
         move_dist = float(np.linalg.norm(self._leader_goal.xy() - ref.xy()))
         self._leader_relocated = (not self._prefer_static_leader) and (move_dist >= 0.35)
+        self._fast_lane_certified = self._compute_fast_lane_certificate(leader_ref=ref, follower_ref=self._follower_init)
 
         self._stage = "STAGING" if self._leader_relocated else "DOCKING"
         self._follower_substage = "APPROACH_PATH"
@@ -365,24 +396,27 @@ class CooperativeDockingSkill:
         yaw_err = abs(yaw_diff)
         dist = float(np.linalg.norm(rel_world))
 
+        fast_lane = bool(self._fast_lane_certified)
         if dist > float(cfg.align_enter_dist_m):
             x_ref = float(clamp(0.70 + 0.18 * dist, float(cfg.standoff_approach_min), float(cfg.standoff_approach_max)))
-            v_cap = float(cfg.v_cap_approach)
+            v_cap = float(1.30 if fast_lane else cfg.v_cap_approach)
         elif dist > float(cfg.dock_enter_dist_m):
             x_ref = float(cfg.standoff_align)
-            v_cap = float(cfg.v_cap_align)
+            v_cap = float(0.42 if fast_lane else cfg.v_cap_align)
         else:
             x_ref = 0.0
-            v_cap = float(cfg.v_cap_dock)
+            v_cap = float(0.18 if fast_lane else cfg.v_cap_dock)
 
         ex = float(x_l - x_ref)
         v_ref = float(leader.v) + float(cfg.k_x) * float(ex)
         v_ref = float(clamp(v_ref, -float(self.cfg.vehicle.max_reverse_speed), float(v_cap)))
 
         # Contact gate: if too close but misaligned, back off to create room.
+        gate_lat = float(cfg.gate_lat_m * (1.8 if fast_lane else 1.0))
+        gate_yaw = math.radians(float(cfg.gate_yaw_deg * (1.8 if fast_lane else 1.0)))
         if dist <= float(cfg.gate_contact_dist_m):
-            if abs(y_l) > float(cfg.gate_lat_m) or yaw_err > math.radians(float(cfg.gate_yaw_deg)):
-                v_ref = float(cfg.gate_backoff_speed)
+            if abs(y_l) > gate_lat or yaw_err > gate_yaw:
+                v_ref = float(-0.08 if fast_lane else cfg.gate_backoff_speed)
         # Strong backoff when entering close range with large misalignment.
         if dist <= 1.0 and yaw_err > math.radians(22.0):
             v_ref = min(float(v_ref), -0.18)
@@ -540,11 +574,12 @@ class CooperativeDockingSkill:
             # Follower approach path until near-field.
             d_goal = float(np.linalg.norm(follower.xy() - self._follower_goal.xy()))
             if (not self._near_field_active) and d_goal > 0.45 and d_tail > float(self.cfg.docking.stage_switch_distance) + 0.20:
+                approach_speed = 1.38 if self._fast_lane_certified else 1.05
                 follower_cmd, _ = self._tracker.command(
                     state=follower,
                     goal=self._follower_goal,
                     path_xy=self._follower_path_xy,
-                    target_speed=1.05,
+                    target_speed=float(approach_speed),
                     obstacles=self.obstacles,
                     other=leader,
                 )
@@ -609,7 +644,7 @@ class CooperativeDockingSkill:
                             self._follower_substage = "SPEED_CLAMP"
 
                     # Contact lock-assist: prioritize speed/yaw matching in the final centimeters.
-                    if self.options.enable_capture_funnel and d_tail <= max(0.25, 2.5 * float(self.cfg.docking.lock_position_tol)):
+                    if self.options.enable_capture_funnel and d_tail <= max(0.18 if self._fast_lane_certified else 0.25, 2.5 * float(self.cfg.docking.lock_position_tol)):
                         max_rate = math.radians(float(self.cfg.vehicle.max_steer_rate_deg_s))
                         dmax = math.radians(float(self.cfg.vehicle.max_steer_deg))
                         v_ref = float(leader.v) + 1.1 * float(clamp(float(x_l), -0.08, 0.08))

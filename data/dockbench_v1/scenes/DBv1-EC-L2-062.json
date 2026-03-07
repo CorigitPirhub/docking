@@ -1,0 +1,183 @@
+{
+  "schema_version": "dockbench-v1.0",
+  "scene_id": "DBv1-EC-L2-062",
+  "split": "test",
+  "family": "EC",
+  "difficulty": "L2",
+  "generator_version": "dock_sgen_1.0",
+  "max_time_s": 38.0,
+  "map": {
+    "width_m": 40.0,
+    "height_m": 20.0,
+    "resolution_m": 0.05
+  },
+  "leader": {
+    "x": -6.489628409810009,
+    "y": 0.30124989615092046,
+    "yaw": 0.13624535640820812
+  },
+  "follower": {
+    "x": -16.37984479760171,
+    "y": 0.16098296015841895,
+    "yaw": 0.07093563561763788
+  },
+  "obstacles": [
+    {
+      "x": -9.907657087106477,
+      "y": -0.1673437030146637,
+      "width": 1.3800000000000001,
+      "height": 2.4,
+      "yaw": 0.13624535640820812,
+      "role": "screen"
+    },
+    {
+      "x": -7.7588010346175205,
+      "y": 2.196428211887783,
+      "width": 1.08,
+      "height": 1.28,
+      "yaw": 0.2584184040478112,
+      "role": "hybrid"
+    },
+    {
+      "x": -9.58712731507519,
+      "y": -5.536014770500367,
+      "width": 1.4989898394614756,
+      "height": 1.4981279217880203,
+      "yaw": 0.31172873014173097,
+      "role": "background"
+    },
+    {
+      "x": 2.2080758872600157,
+      "y": 7.698193925867891,
+      "width": 1.4800733901019534,
+      "height": 1.317076703962323,
+      "yaw": -0.4567496057528616,
+      "role": "background"
+    }
+  ],
+  "descriptors": {
+    "d0_m": 8.297279005388354,
+    "heading_diff_deg": 3.74197136247749,
+    "bearing_deg": 173.00625288870205,
+    "boundary_margin_m": 3.6201552023982906,
+    "clutter_ratio": 0.011111810894039502,
+    "occlusion_index": 1.0,
+    "detour_factor": 1.2656000000000003,
+    "homotopy_count": 3.0,
+    "dock_zone_clearance_m": 0.0,
+    "staging_shift_required_m": 1.4429999999999998,
+    "capture_constraint_index": 0.5519924846634049
+  },
+  "quality": {
+    "valid": true,
+    "label_fidelity": true,
+    "diversity_score": 1.0,
+    "balance_score": 0.8333333333333334,
+    "scene_quality_score": 0.95,
+    "raw_diversity_distance": 1.961850613223811
+  },
+  "audit": {
+    "direct_los_blocked": true,
+    "large_obstacle_present": false,
+    "stage_plan": {
+      "leader_goal": {
+        "vehicle_id": 2,
+        "x": -5.060000763045139,
+        "y": 0.4972442624106126,
+        "yaw": 0.13624535640820812,
+        "v": 0.0,
+        "delta": 0.0,
+        "mode": "FREE"
+      },
+      "follower_goal": {
+        "vehicle_id": 1,
+        "x": -8.916924137165472,
+        "y": -0.03151947137246541,
+        "yaw": 0.13624535640820812,
+        "v": 0.0,
+        "delta": 0.0,
+        "mode": "DOCKING"
+      },
+      "leader_path_xy": [
+        [
+          -6.489628409810009,
+          0.30124989615092046
+        ],
+        [
+          -5.060000763045139,
+          0.4972442624106126
+        ]
+      ],
+      "follower_path_xy": [
+        [
+          -16.37984479760171,
+          0.16098296015841895
+        ],
+        [
+          -8.916924137165472,
+          -0.03151947137246541
+        ]
+      ],
+      "score": 2.7086,
+      "reason": "heuristic_descriptor_estimate"
+    }
+  },
+  "scenario": {
+    "seed": 20570454,
+    "style": "extension_critical",
+    "planner_seed": 20570551,
+    "obstacles": [
+      {
+        "x": -9.907657087106477,
+        "y": -0.1673437030146637,
+        "width": 1.3800000000000001,
+        "height": 2.4,
+        "yaw": 0.13624535640820812
+      },
+      {
+        "x": -7.7588010346175205,
+        "y": 2.196428211887783,
+        "width": 1.08,
+        "height": 1.28,
+        "yaw": 0.2584184040478112
+      },
+      {
+        "x": -9.58712731507519,
+        "y": -5.536014770500367,
+        "width": 1.4989898394614756,
+        "height": 1.4981279217880203,
+        "yaw": 0.31172873014173097
+      },
+      {
+        "x": 2.2080758872600157,
+        "y": 7.698193925867891,
+        "width": 1.4800733901019534,
+        "height": 1.317076703962323,
+        "yaw": -0.4567496057528616
+      }
+    ],
+    "leader": {
+      "vehicle_id": 2,
+      "x": -6.489628409810009,
+      "y": 0.30124989615092046,
+      "yaw": 0.13624535640820812,
+      "v": 0.0,
+      "delta": 0.0,
+      "mode": "FREE"
+    },
+    "follower": {
+      "vehicle_id": 1,
+      "x": -16.37984479760171,
+      "y": 0.16098296015841895,
+      "yaw": 0.07093563561763788,
+      "v": 0.0,
+      "delta": 0.0,
+      "mode": "DOCKING"
+    },
+    "leader_relocation_m": 1.4429999999999998,
+    "follower_detour_ratio": 1.2656000000000003,
+    "direct_los_blocked": true,
+    "large_obstacle_present": false,
+    "subset_tag": "Extension-Critical"
+  }
+}

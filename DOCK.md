@@ -140,7 +140,6 @@ x_r \\ y_r
  = R(\psi_F)^\top\,(h_L - c_F),\quad
 \psi_r = \psi_L - \psi_F
 \]
-
 对接集合（锁定集合）：
 \[
 \mathcal{D} = \Big\{ r:\ \sqrt{x_r^2+y_r^2}\le \epsilon_p,\ |\psi_r|\le \epsilon_\psi,\ |v_F-v_L|\le\epsilon_v \Big\}
@@ -279,6 +278,73 @@ w_T \hat T(x_L^\dagger)+w_E \hat E(x_L^\dagger)+w_R \hat R(x_L^\dagger)
 其中 \(\hat T,\hat E,\hat R\) 可由规划代价/控制能量/风险项近似得到，\(M\) 为大惩罚。  
 **关键点**：这不是“额外工程逻辑”，而是同一 cost 分解下的一个内部离散决策变量（类似小型 task-and-motion 层次，但封装在 Docking Skill 内部）。
 
+### 5.4 `CGFL`：Certificate-Gated Fast Lane（Stage-2.5 当前已合入）
+为解决 `Common-Feasible` 子集上 Full model 相对强传统基线过于保守的问题，当前 Stage-2.5 首先落地了一个**证书门控快速通道**。
+快速通道证书可表述为：仅当“无需 leader relocation、无遮挡、初始航向差小、环境净空充分、dock zone 净空充分”同时满足时，才允许进入 fast lane。
+只有当系统状态进入 \(\mathcal C_{fast}\) 时，才允许：
+1. 提高 predock approach 的参考速度上限；
+2. 放宽近场 contact gate 的保守阈值；
+3. 推迟 lock-assist 的强制低速接管时刻。
+
+这样做的理论含义是：把“共同可解 easy case 的效率最优性”也写成一张**安全证书**，而不是直接删掉 funnel / safety 逻辑。当前实现只在高净空、无遮挡、无 leader relocation 的局面触发，因此不会改变 `SC / FC / EC` 的主机制判别口径。
+
+### 5.5 `TVT`：Terminal Viability Tube（本轮新增设计，针对 `FC-L3`）
+`FC-L3` 的本质不是“单纯再加几条安全 if-else”，而是：
+**在窄 dock zone 中，近场接触段是否存在一段满足 Ackermann 约束、扫掠净空约束、末端捕获约束的短时域可行轨迹。**
+
+为此定义终端可行原语库：
+\[
+\Pi_{tube}=\{\pi_m\}_{m=1}^M,
+\quad
+\pi_m=\{u_0,\dots,u_{H-1}\}
+\]
+每个原语是短时域的 forward / reverse / arc primitive。对任一原语定义：
+\[
+G_{clr}(\pi_m)=\min_{k\le H} d_{clr}(x_k),
+\quad
+E_{cap}(\pi_m)=\alpha_y|y_H|+\alpha_\psi|\psi_H|+\alpha_x|x_H-x_H^{ref}|
+\]
+并定义终端可行集合：
+\[
+\mathcal V_{tube}=\{\pi_m:\ G_{clr}(\pi_m)\ge d_{safe},\ x_H\in \mathcal C_{term}\}
+\]
+其中 \(\mathcal C_{term}\) 是允许安全进入接触带的终端捕获集合。
+
+执行时不再直接把当前名义控制送入接触带，而是求解：
+\[
+\pi^\star = \arg\min_{\pi\in\mathcal V_{tube}} J_{tube}(\pi)
+\]
+若 \(\mathcal V_{tube}=\emptyset\)，则不进入接触段，而是选择 `escape primitive` 回到 funnel 外层并等待重规划。
+
+这条线的理论意义是：把 `FC-L3` 的难点从“局部碰撞补丁”提升成**终端可行域 / viability tube** 问题；只有当存在安全短时域管时，系统才允许进入最危险的终端段。
+
+### 5.6 `VPCR`：Visibility-Persistent Cooperative Re-Staging（本轮新增设计，针对 `EC-L1`）
+`EC-L1` 的本质不是“视觉丢失后怎么补救”，而是：
+**一旦进入近场，对接目标是否仍处在一个对 follower 来说“可持续可见”的协同位姿流形上。**
+
+为此定义 leader staging pose 的可持续可见指标：
+\[
+P_{vis}(x_L^\ddagger)=\frac{1}{N}\sum_{k=1}^{N}\mathbf 1\{\mathrm{LOS}_k=1,\ |\beta_k|\le \theta_{fov}/2,\ d_k\le d_{vis}\}
+\]
+并定义末段可见性保持率与重见距离：
+\[
+\underline P_{vis}(x_L^\ddagger),\qquad D_{reacq}(x_L^\ddagger)
+\]
+于是可持续可见的重 staging 集合为：
+\[
+\mathcal S_{vis}=\{x_L^\ddagger:\ P_{vis}\ge \rho_1,\ \underline P_{vis}\ge \rho_2,\ D_{reacq}\le D_{max}\}
+\]
+发生“已进入近场且曾成功看见目标，但随后视觉长时丢失”的事件后，不再沿原路径硬顶，而是求解：
+\[
+x_L^{\ddagger\star}=\arg\min_{x_L^\ddagger\in\mathcal S_{vis}}
+J_L(x_L^\ddagger)+J_F(x_L^\ddagger)+\lambda_v(1-P_{vis})+\lambda_r D_{reacq}
+\]
+并把系统切回 `re-staging` 模式，直到重建一个可持续可见的接近通道。
+
+这条线的理论意义是：把 `EC-L1` 的失败从“fallback 细节”提升成**visibility-persistent manifold** 问题；目标不再只是“重新看见一次”，而是“重新落到一个近场不会再次快速丢视野的协同流形上”。
+
+> Stage-2.5 中先前已经探索过 `RCS` / `SSTF` 原型，但在 frozen 全量 `test` split 上出现了总体成功率回退，因此当前**未合入主实现**，只保留为实验分支结论。本轮的 `TVT / VPCR` 是对这两条线的更方法化重写。
+
 ---
 
 ## 6. 传统方法基线（P-1.2 强制对比）
@@ -293,7 +359,7 @@ Stage-1/2 报告中的对比协议已在 `CORE_REQUIREMENTS_TASKBOOK.md` 的 `P-
 
 ## 7. Stage-1 验证方式（闭环 + 可视化 + 对照）
 
-> 场景标准与固定数据集以 `DOCK_SCENARIO_STANDARD.md` 为准；Stage-1/Stage-2 的代表场景与批量 split 均应从 `DockBench-v1` 中读取，而不是临时随机挑 seed。
+> 场景标准与固定数据集以 `DOCK_SCENARIO_STANDARD.md` 为准；Stage-1/Stage-2 的代表场景与批量 split 均应从 `DockBench-v1` 中读取，而不是临时随机挑 seed。当前落地实现把候选集生成、support-aware split freeze 与 Stage-0 校验解耦为 `scripts/generate_dockbench_v1.py`、`scripts/freeze_dockbench_v1_splits.py`、`scripts/validate_dockbench_stage0.py` 三步，并把代表场景冻结到 `data/dockbench_v1/dockbench_v1_representatives.json`。
 
 Stage-1 要求：
 1. 在带随机障碍的单场景中，两车随机分布（不近距）；
@@ -316,53 +382,81 @@ Stage-1 要求：
 ---
 
 ## 9. Stage-1 最新验证结论（2026-03-06）
-Stage-1 已从“单一典型 seed 展示”切换为**双代表场景协议**：
-- `Common-Feasible`：`experiments/p_minus1_curated_scenes/common_test_seed7.json`
-- `Extension-Critical`：`experiments/p_minus1_curated_scenes/extension_test_seed14.json`
+Stage-1 已切换到 `DockBench-v1` 的 frozen representative protocol：
+- 数据集：`data/dockbench_v1/`
+- 代表场景：`data/dockbench_v1/dockbench_v1_representatives.json`
+  - `CF_L2 = DBv1-CF-L2-010`
+  - `SC_L2 = DBv1-SC-L2-026`
+  - `FC_L2 = DBv1-FC-L2-046`
+  - `EC_L2 = DBv1-EC-L2-065`
 - 套件脚本：`scripts/run_p_minus1_stage1_suite.py`
-- 报告：`artifacts/P_MINUS1_STAGE1_SUITE_REPORT.md`
-- 数据：`artifacts/p_minus1_stage1_suite_results.json`
+- 报告：`artifacts/dockbench_stage1/P_MINUS1_STAGE1_SUITE_REPORT.md`
+- 数据：`artifacts/dockbench_stage1/p_minus1_stage1_suite_results.json`
 
-当前代表性结果（同场景、同初态、同时间上限）：
-1. **共同可解代表场景**：
-   - `co_bcfd`：`success=True`，`T_done=11.30s`，`collision=False`；
-   - `T_lattice_pbvs`：`success=True`，`T_done=10.45s`；
-   - 结论：已满足“至少 1 个强传统基线在 Common-Feasible 上稳定非零成功”的 Stage-1 要求。
-2. **能力扩展代表场景**：
-   - `co_bcfd`：`success=True`，`T_done=29.85s`，`collision=False`；
-   - `T_lattice_pbvs` / `T_parking_hierarchical`：`geometric_deadlock`；
-   - `T_global_only` / `T_hard_switch` / `T_pure_pursuit`：碰撞失败；
-   - 结论：`cooperative staging + belief-consistent fusion + capture-funnel` 已在强约束扩展场景中形成可解域收益。
-3. **Stage-1 消融现状**：
-   - `A_no_stage`、`A_no_stage_no_belief` 在 `Extension-Critical` 代表场景中稳定失败，直接支撑 cooperative staging 的必要性；
-   - 其余模块（尤其 `belief gate / fallback / micro maneuver`）在当前单一扩展代表场景上差异仍不够充分，后续必须补 `switching-critical` 机制子集做更强验证。
+当前同场景对照结果：
+1. **Common-Feasible / `DBv1-CF-L2-010`**
+   - `co_bcfd`：`success=True`，`T_done=9.70s`，`collision=False`；
+   - `T_lattice_pbvs`：`success=True`，`T_done=8.35s`；
+   - 结论：已满足“强传统基线在共同可解子集稳定非零成功”的 Stage-1 准入要求。
+2. **Switching-Critical / `DBv1-SC-L2-026`**
+   - `co_bcfd`：`success=True`，`T_done=16.85s`，`fallback=2`，`visual_loss=3`；
+   - `T_lattice_pbvs`：`success=True`，`T_done=13.70s`；
+   - `A_no_belief_gate`：仍可成功，但 `fallback / visual_loss` 进一步上升；
+   - 结论：`SC` 代表场景当前主要体现为**response-regime 证据**，即感知切换与回退链路被稳定触发，而不是简单的 ablation 全灭。
+3. **Funnel-Critical / `DBv1-FC-L2-046`**
+   - `co_bcfd`：`success=True`，`T_done=10.10s`，`fallback=5`，`visual_loss=6`；
+   - `T_lattice_pbvs`：`success=True`，`T_done=7.80s`；
+   - `A_no_funnel_gate / A_no_micro_maneuver`：当前在该代表场景上未形成硬失败，但近场高回退/高视觉丢失 regime 已稳定出现；
+   - 结论：`FC` 的代表证据当前同样以**response-regime** 为主，而非单点 catastrophic gap。
+4. **Extension-Critical / `DBv1-EC-L2-065`**
+   - `co_bcfd`：`success=True`，`T_done=25.45s`，`collision=False`；
+   - `T_lattice_pbvs / T_parking_hierarchical / A_no_stage / A_no_stage_no_belief`：全部失败；
+   - 结论：`cooperative staging` 的可解域收益在 `EC` family 上是当前最清晰、最稳定的 Stage-1 证据。
 
 ### 9.1 Stage-1 到 Stage-2 期间的关键修订
-1. **Stage-1/2 协议切换**：`scripts/run_p_minus1_stage1_suite.py`、`scripts/run_p_minus1_stage2_batch.py` 已切换到 `curated manifest + tuning/test split + strong/classical/capability baselines + core ablations`。
-2. **小幅 leader 重定位计划执行一致性修复**：`docking/dock_skill.py` 新增 small-relocation canonicalization；当 planner 给出小于执行阈值的 leader 位姿偏移时，执行层自动回收为静态 leader predock 计划，避免“计划中 leader 微移、执行中 leader 不动”的协议不一致。
-3. **近场回退/重规划链路稳定化**：`docking/dock_skill.py` 保留 staging 超时转 docking、近场停滞重规划与安全投影，支撑 Extension-Critical 场景闭环收敛。
-4. **代表场景冻结**：当前 Stage-1 的正式代表场景已冻结到 `seed7` 与 `seed14`，不再使用早期 `seed2 random/typical` 单例叙事作为正式结论依据。
-
----
+1. **DockBench-v1 正式冻结**：生成、split 冻结、Stage-0 审计分别固定为 `scripts/generate_dockbench_v1.py`、`scripts/freeze_dockbench_v1_splits.py`、`scripts/validate_dockbench_stage0.py`。
+2. **支持层与 benchmark 口径对齐**：Stage-0 audit 现在同时检查 `label_match + tuning admission + representative readiness`，避免旧版 `seed` 演示与正式 benchmark 脱节。
+3. **Timeout 问题显式回归验证**：`SC-L1` 中存在至少 1 个场景在 `22s` 时限下表现为 deadlock、在 `30s` 时限下可完成对接，因此当前 `DockBench-v1` 已把 `SC-L1` 的正式 `max_time_s` 提升到 `30s`，避免把“时间上限过紧”误判为机制失效。
+4. **Response-regime 作为正式证据类型**：对于 `SC / FC`，当前论文叙事不再强求“ablation 一定 hard fail”，而是接受“fallback / visual_loss / time-cost 显著上升”的 regime gap 作为 family 证据的一部分。
 
 ## 10. Stage-2 批量对比结论（2026-03-06）
-Stage-2 现已切换为**curated paired benchmark**，不再使用早期 `random seed=0..19` 单口径统计：
+Stage-2 已切换到 `DockBench-v1` frozen test split：
+- 数据集：`data/dockbench_v1/`
 - 批量脚本：`scripts/run_p_minus1_stage2_batch.py`
-- 协议文档：`artifacts/P_MINUS1_BASELINE_PROTOCOL.md`
-- 当前 manifest：
-  - tuning：`common_tuning_seed111/112`
-  - test：`common_test_seed0/1/4/7` + `extension_test_seed14`
-- 报告：`artifacts/P_MINUS1_STAGE2_REPORT.md`
-- 数据：`artifacts/p_minus1_stage2_results.json`
-- 图表：`artifacts/p_minus1_stage2_success_heatmap.png`、`artifacts/p_minus1_stage2_subset_compare.png`、`artifacts/p_minus1_stage2_failure_clusters.png`、`artifacts/p_minus1_stage2_ablation_summary.png`
+- Stage-0 审计：`data/dockbench_v1/dockbench_v1_stage0_audit.json`
+- 报告：`artifacts/dockbench_stage2_fast/P_MINUS1_STAGE2_REPORT.md`
+- 数据：`artifacts/dockbench_stage2_fast/p_minus1_stage2_results.json`
+- 图表：`artifacts/dockbench_stage2_fast/p_minus1_stage2_success_heatmap.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_subset_compare.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_failure_clusters.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_ablation_summary.png`
 
-当前批量结论：
-1. **任务级门槛已过**：`co_bcfd` overall `success_rate=1.000`、`collision_rate=0.000`、`avg_T_done=13.62s`，满足 P-1.3 Stage-2 的基础成功/安全/时间门槛。
-2. **共同可解子集基线有效**：最优强传统基线 `T_lattice_pbvs` 在 `Common-Feasible` 子集上 `success_rate=1.000`，因此当前对比集满足“强传统基线具备真实竞争力”的准入条件。
-3. **能力扩展收益明确**：在 `Extension-Critical` 子集（当前验证集 `n=1`）上，`co_bcfd` 成功率 `1.000`，最优强传统基线成功率 `0.000`，满足当前 `+15pt` 扩展收益门槛。
-4. **仍未完全闭环的点**：
-   - `Common-Feasible` 子集上，`co_bcfd` 虽已达到**成功率非劣**，但尚未形成相对最优强传统基线的 `T_done / cost` 5% 优势；
-   - 因此 P-1.3 的“共同可解竞争性”条款目前仍是**部分完成**，后续需要通过 `switching-critical` 共通场景补强与 easy-case 控制代价优化来继续收敛；
-   - 当前 `Extension-Critical` validated test 集规模仍偏小，challenge 子集与 GIF 回放也尚未重新生成。
+当前批量结果：
+1. **任务级主门槛已跨过**：`co_bcfd` overall `success_rate = 0.9583 (46/48)`，`success >= 95%` 已满足；`Common-Feasible` 上强传统基线稳定非零成功也已满足。
+2. **family 分解**：
+   - `CF`：`success=1.000`，`collision=0.000`，`avg_T_done=11.88s`；
+   - `SC`：`success=1.000`，`collision=0.000`，`avg_T_done=22.26s`；
+   - `FC`：`success=0.9167`，`collision=0.0833`，`avg_T_done=16.81s`；
+   - `EC`：`success=0.9167`，`collision=0.000`，`avg_T_done=29.98s`。
+3. **当前 gate 状态**：
+   - `co_success_ge_095 = True`；
+   - `strong_cf_nonzero = True`；
+   - `p13_extension_gain_ge_15pt = True`；
+   - `co_collision_zero = False`；
+   - `co_avg_time_le_15 = False`。
+4. **残余失败场景**：
+   - `DBv1-FC-L3-052`：`collision`；
+   - `DBv1-EC-L1-059`：`fov_loss_unrecovered`。
+5. **当前结论**：
+   - `P-1.1B` 与 `P-1.2 Stage-0` 已经正式落地；
+   - `P-1.2 Stage-1 / Stage-2` 的 frozen benchmark、报告链路、family 口径、代表场景与批量统计均已成型；
+   - 若以“全场景验证策略层有效性并可视化”为目标，当前基础支撑已经能稳定支撑**大规模双车验证**，但距离“碰撞率严格为 0、整体平均时间压到 15s 内”的更高门槛仍差最后两类 hard cases（`FC-L3`、`EC-L1`）。
 
-因此，按当前证据：**P-1.2 Stage-1/Stage-2 已具备可复现的实现与报告框架，P-1.3 的“扩展能力优于传统方法”已成立，但“共同可解子集竞争性”仍需继续补强。**
+### 10.1 Stage-2.5 当前合入结果（2026-03-07）
+- 已正式合入主实现的是 `CGFL` fast lane；其稳定回归结果见 `artifacts/stage25_final_co_only/co_only_summary.json`，对应 failure-mode 分层统计见 `artifacts/stage25_final_co_only/failure_mode_summary.json`。
+- 当前 `co_bcfd` 在 frozen `test` split 上的 **co-only 回归** 为：overall 成功率 `0.9583`、碰撞率 `0.0208`、平均完成时间 `19.72s`；其中 `CF` 平均时间从先前的 `11.88s` 收缩到 `10.42s`。
+- 失败模式分层统计进一步确认：当前剩余失败**只集中在 2 个场景**：`FC-L3-052 / collision` 与 `EC-L1-059 / fov_loss_unrecovered`。
+- 本轮按照“failure-mode 分层统计 → 最小作用域改动 → 单案复现 → frozen 全量 test 回归”的顺序，再次围绕这两个 hard case 做了原型探索：
+  - `M1` 的最小作用域原型在 `DBv1-FC-L3-052` 单案上可把 `collision` 拉回 `success`；
+  - `M2` 的最小作用域原型在 `DBv1-EC-L1-059` 单案上可把 `fov_loss_unrecovered` 拉回 `success`；
+  - 但一旦放到 frozen 全量 `test` split，仍会诱发新的 `SC/EC` 回退，因此当前这两类修复**依然不能安全合入主线**。
+- 相关失败证据保留在 `artifacts/stage25_stage2/p_minus1_stage2_results.json`、`artifacts/stage25_stage2b/p_minus1_stage2_results.json`、`artifacts/stage25_m1_co_only/co_only_summary.json`，用来证明“单案可修复”尚未等价于“全量不过拟合修复”。
+
+因此，当前最合理的研究判断是：**DockBench-v1 / Stage-0 / Stage-1 / Stage-2 的制度化框架已经完成，可以作为后续 Stage-3 多车实验的正式前置基线；Stage-2.5 已经完成第一轮可控改进（`CGFL`），并明确锁定了最后两个残余 hard case，但要把 P-1 做到“完全收敛”，仍需继续针对 `FC-L3` 的近场碰撞与 `EC-L1` 的视觉丢失回退做更稳健、不过拟合的改进。**

@@ -191,11 +191,11 @@ def family_thresholds(family: str, difficulty: str) -> dict[str, tuple[float, fl
         "FC": {
             "d0_m": (5.0, 9.0),
             "heading_diff_deg": ({"L1": 6.0, "L2": 10.0, "L3": 14.0}[lvl], {"L1": 18.0, "L2": 26.0, "L3": 34.0}[lvl]),
-            "occlusion_index": (0.0, 0.34),
-            "detour_factor": (1.0, {"L1": 1.14, "L2": 1.22, "L3": 1.32}[lvl]),
-            "staging_shift_required_m": (0.0, {"L1": 0.34, "L2": 0.50, "L3": 0.65}[lvl]),
-            "dock_zone_clearance_m": ({"L1": 0.70, "L2": 0.52, "L3": 0.34}[lvl], {"L1": 1.05, "L2": 0.82, "L3": 0.62}[lvl]),
-            "capture_constraint_index": ({"L1": 0.42, "L2": 0.54, "L3": 0.66}[lvl], 1.0),
+            "occlusion_index": (0.0, 1.0),
+            "detour_factor": (1.0, {"L1": 1.20, "L2": 1.28, "L3": 1.36}[lvl]),
+            "staging_shift_required_m": (0.0, {"L1": 0.38, "L2": 0.54, "L3": 0.70}[lvl]),
+            "dock_zone_clearance_m": ({"L1": 0.45, "L2": 0.30, "L3": 0.10}[lvl], {"L1": 1.12, "L2": 0.92, "L3": 0.72}[lvl]),
+            "capture_constraint_index": ({"L1": 0.15, "L2": 0.24, "L3": 0.30}[lvl], 1.0),
         },
         "EC": {
             "d0_m": (6.0, 12.5),
@@ -204,7 +204,7 @@ def family_thresholds(family: str, difficulty: str) -> dict[str, tuple[float, fl
             "detour_factor": ({"L1": 1.10, "L2": 1.18, "L3": 1.28}[lvl], 3.0),
             "staging_shift_required_m": ({"L1": 0.72, "L2": 1.02, "L3": 1.35}[lvl], 6.0),
             "dock_zone_clearance_m": (0.0, {"L1": 0.90, "L2": 0.76, "L3": 0.64}[lvl]),
-            "capture_constraint_index": ({"L1": 0.42, "L2": 0.52, "L3": 0.62}[lvl], 1.0),
+            "capture_constraint_index": ({"L1": 0.20, "L2": 0.36, "L3": 0.44}[lvl], 1.0),
         },
     }
     return thresholds[fam]

@@ -1,0 +1,168 @@
+{
+  "schema_version": "dockbench-v1.0",
+  "scene_id": "DBv1-FC-L2-045",
+  "split": "test",
+  "family": "FC",
+  "difficulty": "L2",
+  "generator_version": "dock_sgen_1.0",
+  "max_time_s": 30.0,
+  "map": {
+    "width_m": 40.0,
+    "height_m": 20.0,
+    "resolution_m": 0.05
+  },
+  "leader": {
+    "x": 7.603724377693421,
+    "y": 1.951726942910434,
+    "yaw": 0.08063548223311096
+  },
+  "follower": {
+    "x": 0.043808909331735535,
+    "y": 1.9577079318232862,
+    "yaw": -0.16226083302370586
+  },
+  "obstacles": [
+    {
+      "x": 5.398385243822589,
+      "y": 2.9222444876348193,
+      "width": 1.5299999999999998,
+      "height": 0.32,
+      "yaw": 0.19408188361274237,
+      "role": "dock_zone"
+    },
+    {
+      "x": 5.582840455945401,
+      "y": 0.6396853373123728,
+      "width": 1.5299999999999998,
+      "height": 0.32,
+      "yaw": -0.032810919146520456,
+      "role": "dock_zone"
+    },
+    {
+      "x": 14.755083800849444,
+      "y": -5.7724561373961425,
+      "width": 1.046359834829486,
+      "height": 1.1331903546132347,
+      "yaw": 0.325504576809195,
+      "role": "background"
+    }
+  ],
+  "descriptors": {
+    "d0_m": 5.97820722501155,
+    "heading_diff_deg": 13.9169337234947,
+    "bearing_deg": 175.33459793212518,
+    "boundary_margin_m": 8.042292068176714,
+    "clutter_ratio": 0.0027061560903543385,
+    "occlusion_index": 0.0,
+    "detour_factor": 1.1540000000000001,
+    "homotopy_count": 1.0,
+    "dock_zone_clearance_m": 0.7302480216941751,
+    "staging_shift_required_m": 0.264,
+    "capture_constraint_index": 0.2880336804593836
+  },
+  "quality": {
+    "valid": true,
+    "label_fidelity": true,
+    "diversity_score": 0.1258903649128166,
+    "balance_score": 0.6666666666666667,
+    "scene_quality_score": 0.28812325543897166,
+    "raw_diversity_distance": 0.02266026568430699
+  },
+  "audit": {
+    "direct_los_blocked": false,
+    "large_obstacle_present": false,
+    "stage_plan": {
+      "leader_goal": {
+        "vehicle_id": 2,
+        "x": 7.866866567948935,
+        "y": 1.9729916485874743,
+        "yaw": 0.08063548223311096,
+        "v": 0.0,
+        "delta": 0.0,
+        "mode": "FREE"
+      },
+      "follower_goal": {
+        "vehicle_id": 1,
+        "x": 5.161685112064602,
+        "y": 1.7543840303772957,
+        "yaw": 0.08063548223311096,
+        "v": 0.0,
+        "delta": 0.0,
+        "mode": "DOCKING"
+      },
+      "leader_path_xy": [
+        [
+          7.603724377693421,
+          1.951726942910434
+        ],
+        [
+          7.866866567948935,
+          1.9729916485874743
+        ]
+      ],
+      "follower_path_xy": [
+        [
+          0.043808909331735535,
+          1.9577079318232862
+        ],
+        [
+          5.161685112064602,
+          1.7543840303772957
+        ]
+      ],
+      "score": 1.4180000000000001,
+      "reason": "heuristic_descriptor_estimate"
+    }
+  },
+  "scenario": {
+    "seed": 20470585,
+    "style": "funnel_critical",
+    "planner_seed": 20470682,
+    "obstacles": [
+      {
+        "x": 5.398385243822589,
+        "y": 2.9222444876348193,
+        "width": 1.5299999999999998,
+        "height": 0.32,
+        "yaw": 0.19408188361274237
+      },
+      {
+        "x": 5.582840455945401,
+        "y": 0.6396853373123728,
+        "width": 1.5299999999999998,
+        "height": 0.32,
+        "yaw": -0.032810919146520456
+      },
+      {
+        "x": 14.755083800849444,
+        "y": -5.7724561373961425,
+        "width": 1.046359834829486,
+        "height": 1.1331903546132347,
+        "yaw": 0.325504576809195
+      }
+    ],
+    "leader": {
+      "vehicle_id": 2,
+      "x": 7.603724377693421,
+      "y": 1.951726942910434,
+      "yaw": 0.08063548223311096,
+      "v": 0.0,
+      "delta": 0.0,
+      "mode": "FREE"
+    },
+    "follower": {
+      "vehicle_id": 1,
+      "x": 0.043808909331735535,
+      "y": 1.9577079318232862,
+      "yaw": -0.16226083302370586,
+      "v": 0.0,
+      "delta": 0.0,
+      "mode": "DOCKING"
+    },
+    "leader_relocation_m": 0.264,
+    "follower_detour_ratio": 1.1540000000000001,
+    "direct_los_blocked": false,
+    "large_obstacle_present": false,
+    "subset_tag": "Funnel-Critical"
+  }
+}

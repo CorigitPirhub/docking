@@ -1,0 +1,134 @@
+[
+  {
+    "scene_id": "DBv1-CF-L1-001",
+    "split": "challenge",
+    "family": "CF",
+    "difficulty": "L1",
+    "seed": 20260323,
+    "style": "common_feasible",
+    "subset_tag": "Common-Feasible",
+    "max_time_s": 16.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L1-001.json"
+  },
+  {
+    "scene_id": "DBv1-CF-L2-007",
+    "split": "challenge",
+    "family": "CF",
+    "difficulty": "L2",
+    "seed": 20270323,
+    "style": "common_feasible",
+    "subset_tag": "Common-Feasible",
+    "max_time_s": 18.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L2-007.json"
+  },
+  {
+    "scene_id": "DBv1-CF-L3-013",
+    "split": "challenge",
+    "family": "CF",
+    "difficulty": "L3",
+    "seed": 20280323,
+    "style": "common_feasible",
+    "subset_tag": "Common-Feasible",
+    "max_time_s": 20.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L3-013.json"
+  },
+  {
+    "scene_id": "DBv1-SC-L1-023",
+    "split": "challenge",
+    "family": "SC",
+    "difficulty": "L1",
+    "seed": 20360847,
+    "style": "switching_critical",
+    "subset_tag": "Switching-Critical",
+    "max_time_s": 30.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L1-023.json"
+  },
+  {
+    "scene_id": "DBv1-SC-L2-027",
+    "split": "challenge",
+    "family": "SC",
+    "difficulty": "L2",
+    "seed": 20370585,
+    "style": "switching_critical",
+    "subset_tag": "Switching-Critical",
+    "max_time_s": 28.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L2-027.json"
+  },
+  {
+    "scene_id": "DBv1-SC-L3-036",
+    "split": "challenge",
+    "family": "SC",
+    "difficulty": "L3",
+    "seed": 20380978,
+    "style": "switching_critical",
+    "subset_tag": "Switching-Critical",
+    "max_time_s": 33.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L3-036.json"
+  },
+  {
+    "scene_id": "DBv1-FC-L1-037",
+    "split": "challenge",
+    "family": "FC",
+    "difficulty": "L1",
+    "seed": 20460323,
+    "style": "funnel_critical",
+    "subset_tag": "Funnel-Critical",
+    "max_time_s": 28.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L1-037.json"
+  },
+  {
+    "scene_id": "DBv1-FC-L2-048",
+    "split": "challenge",
+    "family": "FC",
+    "difficulty": "L2",
+    "seed": 20470978,
+    "style": "funnel_critical",
+    "subset_tag": "Funnel-Critical",
+    "max_time_s": 30.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L2-048.json"
+  },
+  {
+    "scene_id": "DBv1-FC-L3-049",
+    "split": "challenge",
+    "family": "FC",
+    "difficulty": "L3",
+    "seed": 20480323,
+    "style": "funnel_critical",
+    "subset_tag": "Funnel-Critical",
+    "max_time_s": 40.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L3-049.json"
+  },
+  {
+    "scene_id": "DBv1-EC-L1-060",
+    "split": "challenge",
+    "family": "EC",
+    "difficulty": "L1",
+    "seed": 20560978,
+    "style": "extension_critical",
+    "subset_tag": "Extension-Critical",
+    "max_time_s": 32.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-EC-L1-060.json"
+  },
+  {
+    "scene_id": "DBv1-EC-L2-066",
+    "split": "challenge",
+    "family": "EC",
+    "difficulty": "L2",
+    "seed": 20570978,
+    "style": "extension_critical",
+    "subset_tag": "Extension-Critical",
+    "max_time_s": 38.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-EC-L2-066.json"
+  },
+  {
+    "scene_id": "DBv1-EC-L3-072",
+    "split": "challenge",
+    "family": "EC",
+    "difficulty": "L3",
+    "seed": 20580997,
+    "style": "extension_critical",
+    "subset_tag": "Extension-Critical",
+    "max_time_s": 44.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-EC-L3-072.json"
+  }
+]

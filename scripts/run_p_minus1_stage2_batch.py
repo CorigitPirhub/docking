@@ -94,32 +94,69 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _run_stage1_once(*, scene_json: str, methods: Iterable[str], out_dir: Path, max_time_s: float, skip_gifs: bool) -> dict[str, Any]:
+def _run_stage1_once(*, scene_json: str, methods: Iterable[str], out_dir: Path, max_time_s: float, skip_gifs: bool, cache_dirs: Iterable[Path] | None = None) -> dict[str, Any]:
     payload = json.loads(Path(scene_json).read_text(encoding="utf-8"))
     seed = int(payload["scenario"]["seed"])
-    result_path = out_dir / f"p_minus1_stage1_results_seed{seed}.json"
-    if result_path.exists():
-        cached = json.loads(result_path.read_text(encoding="utf-8"))
-        got = {str(run["metrics"]["method_id"]) for run in cached.get("runs", [])}
-        need = set(methods)
-        if need.issubset(got):
-            return cached
-    cmd = [
-        sys.executable,
-        str(STAGE1_SCRIPT),
-        "--scenario-json",
-        str(scene_json),
-        "--methods",
-        ",".join(methods),
-        "--out-dir",
-        str(out_dir),
-        "--max-time-s",
-        str(float(max_time_s)),
-    ]
-    if skip_gifs:
-        cmd.append("--skip-gifs")
-    subprocess.run(cmd, check=True, cwd=str(ROOT), capture_output=True, text=True)
-    return json.loads(result_path.read_text(encoding="utf-8"))
+    scenario_signature = payload.get("scenario", {})
+    result_name = f"p_minus1_stage1_results_seed{seed}.json"
+    result_path = out_dir / result_name
+    need = [str(mid) for mid in methods]
+    seen: set[str] = set()
+    merged_runs: list[dict[str, Any]] = []
+    method_specs: dict[str, Any] = {}
+    staging_plan: dict[str, Any] | None = None
+    for cache_dir in [out_dir, *(list(cache_dirs or []))]:
+        candidate = cache_dir / result_name
+        if not candidate.exists():
+            continue
+        cached = json.loads(candidate.read_text(encoding="utf-8"))
+        if cached.get("scenario", {}) != scenario_signature:
+            continue
+        if staging_plan is None:
+            staging_plan = cached.get("staging_plan")
+        method_specs.update(cached.get("method_specs", {}))
+        for run in cached.get("runs", []):
+            mid = str(run["metrics"]["method_id"])
+            if mid not in seen:
+                seen.add(mid)
+                merged_runs.append(run)
+    missing = [mid for mid in need if mid not in seen]
+    if missing:
+        tmp_dir = out_dir / "_stage2_merge_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            sys.executable,
+            str(STAGE1_SCRIPT),
+            "--scenario-json",
+            str(scene_json),
+            "--methods",
+            ",".join(missing),
+            "--out-dir",
+            str(tmp_dir),
+            "--max-time-s",
+            str(float(max_time_s)),
+        ]
+        if skip_gifs:
+            cmd.append("--skip-gifs")
+        subprocess.run(cmd, check=True, cwd=str(ROOT), capture_output=True, text=True)
+        fresh = json.loads((tmp_dir / result_name).read_text(encoding="utf-8"))
+        if staging_plan is None:
+            staging_plan = fresh.get("staging_plan")
+        method_specs.update(fresh.get("method_specs", {}))
+        for run in fresh.get("runs", []):
+            mid = str(run["metrics"]["method_id"])
+            if mid not in seen:
+                seen.add(mid)
+                merged_runs.append(run)
+    merged = {
+        "scenario": scenario_signature,
+        "staging_plan": staging_plan or {},
+        "method_specs": method_specs,
+        "runs": [run for run in merged_runs if str(run["metrics"]["method_id"]) in need],
+    }
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    return merged
 
 
 def _extract_rows(result: dict[str, Any], spec) -> list[SceneMethodResult]:
@@ -159,8 +196,8 @@ def _extract_rows(result: dict[str, Any], spec) -> list[SceneMethodResult]:
     return rows
 
 
-def _run_scene_bundle(spec, *, methods: list[str], out_dir: Path, max_time_s: float, skip_gifs: bool) -> list[SceneMethodResult]:
-    result = _run_stage1_once(scene_json=spec.scenario_json, methods=methods, out_dir=out_dir, max_time_s=min(float(max_time_s), float(spec.max_time_s)), skip_gifs=skip_gifs)
+def _run_scene_bundle(spec, *, methods: list[str], out_dir: Path, max_time_s: float, skip_gifs: bool, cache_dirs: Iterable[Path] | None = None) -> list[SceneMethodResult]:
+    result = _run_stage1_once(scene_json=spec.scenario_json, methods=methods, out_dir=out_dir, max_time_s=min(float(max_time_s), float(spec.max_time_s)), skip_gifs=skip_gifs, cache_dirs=cache_dirs)
     return _extract_rows(result, spec)
 
 
@@ -396,11 +433,11 @@ def _load_stage0_audit(ds_root: Path) -> dict[str, Any]:
     return {"pass": False, "family_admission": {}, "rows": []}
 
 
-def _parallel_run(specs, *, methods: list[str], out_dir: Path, max_time_s: float, workers: int) -> list[SceneMethodResult]:
+def _parallel_run(specs, *, methods: list[str], out_dir: Path, max_time_s: float, workers: int, cache_dirs: Iterable[Path] | None = None) -> list[SceneMethodResult]:
     rows: list[SceneMethodResult] = []
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as executor:
         futs = {
-            executor.submit(_run_scene_bundle, spec, methods=methods, out_dir=out_dir, max_time_s=max_time_s, skip_gifs=True): spec.scene_id
+            executor.submit(_run_scene_bundle, spec, methods=methods, out_dir=out_dir, max_time_s=max_time_s, skip_gifs=True, cache_dirs=cache_dirs): spec.scene_id
             for spec in specs
         }
         for fut in as_completed(futs):
@@ -419,13 +456,14 @@ def main() -> None:
     tuning_manifest = load_manifest(ds_root, split="tuning")
     test_manifest = load_manifest(ds_root, split="test")
     challenge_manifest = load_manifest(ds_root, split="challenge")
+    shared_cache_dirs = [ds_root / "stage0_full_audit_runs"]
     protocol_path = out_dir / "P_MINUS1_BASELINE_PROTOCOL.md"
     _write_protocol(protocol_path, tuning=tuning_manifest, test=test_manifest, challenge=challenge_manifest)
 
     stage0_audit = _load_stage0_audit(ds_root)
     methods = [*BATCH_FULL_METHOD_IDS, *CORE_ABLATION_METHOD_IDS]
-    test_rows = _parallel_run(test_manifest, methods=methods, out_dir=stage1_tmp, max_time_s=float(args.max_time_s), workers=int(args.workers))
-    challenge_rows = _parallel_run(challenge_manifest, methods=BATCH_FULL_METHOD_IDS, out_dir=stage1_tmp, max_time_s=float(args.max_time_s), workers=int(args.workers)) if challenge_manifest else []
+    test_rows = _parallel_run(test_manifest, methods=methods, out_dir=stage1_tmp, max_time_s=float(args.max_time_s), workers=int(args.workers), cache_dirs=shared_cache_dirs)
+    challenge_rows = _parallel_run(challenge_manifest, methods=BATCH_FULL_METHOD_IDS, out_dir=stage1_tmp, max_time_s=float(args.max_time_s), workers=int(args.workers), cache_dirs=shared_cache_dirs) if challenge_manifest else []
 
     aggregates: list[MethodAggregate] = []
     for subset in ["Overall", *FAMILIES]:
@@ -490,7 +528,7 @@ def main() -> None:
                 family_methods.append("A_no_funnel_gate")
             elif spec.family == "EC":
                 family_methods.append("A_no_stage")
-            _run_stage1_once(scene_json=spec.scenario_json, methods=family_methods, out_dir=out_dir, max_time_s=min(float(args.max_time_s), float(spec.max_time_s)), skip_gifs=False)
+            _run_stage1_once(scene_json=spec.scenario_json, methods=family_methods, out_dir=out_dir, max_time_s=min(float(args.max_time_s), float(spec.max_time_s)), skip_gifs=False, cache_dirs=shared_cache_dirs)
             payload = json.loads(Path(spec.scenario_json).read_text(encoding="utf-8"))
             seed = int(payload["scenario"]["seed"])
             for mid in family_methods:

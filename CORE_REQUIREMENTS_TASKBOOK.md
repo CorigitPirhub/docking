@@ -109,6 +109,7 @@
 
 0. **Stage-0：场景标准化与数据集冻结（由 P-1.1B 定义，P-1.2 使用并验证）**
    - 冻结 `DockBench-v1` 的 family、difficulty、split、scene id、JSON schema 与 quality evaluator。
+   - 当前仓库的标准落地输出目录固定为 `data/dockbench_v1/`；生成、split 冻结、Stage-0 审计分别由 `scripts/generate_dockbench_v1.py`、`scripts/freeze_dockbench_v1_splits.py`、`scripts/validate_dockbench_stage0.py` 负责。
    - Stage-1/Stage-2 的正式场景必须从 frozen dataset 中选取，不允许用临时随机 seed 替代正式 test split。
    - Stage-0 的正确性由 Stage-1/Stage-2 共同反证：若出现“family 标签与真实执行机理不一致”“Common-Feasible 强基线全灭”“Extension-Critical 本质无解”等情况，优先回到 Stage-0 修正数据集而不是先改结论。
 
@@ -128,6 +129,100 @@
    - 批量消融：至少对 `A-NoStage`、`A-NoBeliefGate`、`A-NoFunnelGate`、`A-NoMicroManeuver` 做多 seed 统计；其余模块可在机制子集上补跑。
    - 交付可视化：每个场景至少 1 个回放 GIF（含本方法 vs 传统方法对照）+ 汇总图表（success heatmap、耗时/代价分布、失败聚类、方法对比柱状/雷达图、ablation bar/heatmap 等）。
 
+2.5 **Stage-2.5：`co_bcfd` 全指标 SOTA 冲击计划（进入 Stage-3 前强制 Gate）**
+   - **总体原则**：在进入 Stage-3 多车实验之前，必须先把 `co_bcfd` 在 frozen 双车 benchmark 上尽可能收敛到“**高成功率 + 零碰撞 + 低耗时 + 强共同可解竞争性 + 机制证据充分**”的状态；不允许通过修改 `test/challenge` split、放松协议或引入 data leakage 来“刷分”。
+   - **输入协议固定**：只允许使用 `data/dockbench_v1/` 的 `tuning / test / challenge`；所有阈值、超参、模式切换逻辑与新增模块的标定只能在 `tuning` 上完成，`test/challenge` 只做一次性评估与复现。
+   - **短板清单（由当前 Stage-2 直接驱动）**：
+     1. `FC-L3` 仍存在近场碰撞，说明 `Capture-Funnel + Safety Projection` 在极窄净空终端段尚未完全闭合；
+     2. `EC-L1` 仍存在 `fov_loss_unrecovered`，说明 `Cooperative Staging + fallback` 还没有把“可对接”与“可持续可见”统一优化；
+     3. `Common-Feasible` 子集上相对最优强传统基线仍缺少 `T_done / trajectory_cost` 优势，说明当前 Full model 在 easy/common case 上仍偏保守；
+     4. `SC / FC` 上已有 response-regime 证据，但 `Belief Gate / Funnel Gate / Micro Maneuver` 的增益还没有全部形成更强的统计显著性。
+   - **执行版路线（按 4 条主线组织）**：
+
+   **主线 1：安全性主线 —— `FC-L3` 清零碰撞**
+   - **模块改进清单**：
+     1. `Terminal Sweep Guard`：把单步安全投影扩展为短时域 swept-volume 守护；
+     2. `Contact Gate`：把接触带进入条件改成“距离 + 横向偏差 + 航向误差 + 扫掠净空证书”的联合门；
+     3. `Backoff / Reverse-Arc Library`：补接触前微机动库，使失败优先转化为 backoff / replan 而不是碰撞；
+     4. `Terminal Speed Clamp`：对 `FC-L2/L3` 单独校准 terminal speed envelope。
+   - **优先修改文件**：`docking/dock_skill.py`、`docking/coop_docking.py`、必要时 `docking/bcfd.py`。
+   - **对应实验脚本**：
+     1. 单案复现：`scripts/run_p_minus1_stage1_docking.py --scenario-json data/dockbench_v1/scenes/DBv1-FC-L3-052.json ...`
+     2. family 回归：`scripts/run_p_minus1_stage2_batch.py --dataset-root data/dockbench_v1 ...`，重点看 `FC` 与 `Overall`；
+     3. 机制对照：Stage-2 报告中比较 `co_bcfd` vs `A-NoFunnelGate` vs `A-NoMicroManeuver`。
+   - **预期验收指标**：
+     1. `DBv1-FC-L3-052` 从 `collision` 变为 `success` 或至少变为非碰撞失败；
+     2. frozen `test` split 上 `collision_rate = 0`；
+     3. `FC` family success `>= 0.95`；
+     4. `FC` 上 `A-NoFunnelGate` 的退化证据仍需保留，不能靠“抹平机制差异”换成功率。
+
+   **主线 2：可见性主线 —— `EC-L1` 清零 `fov_loss_unrecovered`**
+   - **模块改进清单**：
+     1. `RCS`（Revisibility-Constrained Staging）：在 staging 目标评估中显式加入 `LOS persistence / reacquisition distance / visibility margin`；
+     2. `Fallback Tube`：把视觉丢失后的回退目标从“继续全局逼近”改成“回到最近可重见 tube / pose”；
+     3. `Visibility-Aware Replan Trigger`：当 `visual_lost_time`、`reacquisition margin`、`occlusion forecast` 超阈值时提前重规划；
+     4. `Leader Cooperation Constraint`：Leader staging 必须优先选择“可持续可见”的姿态，而不是仅最短路径姿态。
+   - **优先修改文件**：`docking/coop_docking.py`、`docking/dock_skill.py`，必要时 `docking/sensors.py`（仅可见性判据，不得改 benchmark 协议）。
+   - **对应实验脚本**：
+     1. 单案复现：`scripts/run_p_minus1_stage1_docking.py --scenario-json data/dockbench_v1/scenes/DBv1-EC-L1-059.json ...`
+     2. family 回归：`scripts/run_p_minus1_stage2_batch.py --dataset-root data/dockbench_v1 ...`，重点看 `EC` 与 `SC`；
+     3. 审计回归：`scripts/validate_dockbench_stage0.py --dataset-root data/dockbench_v1`，确保 `EC` tuning / representative 未被打穿。
+   - **预期验收指标**：
+     1. `DBv1-EC-L1-059` 从 `fov_loss_unrecovered` 变为 `success`；
+     2. frozen `test` split 上 `fov_loss_unrecovered = 0`；
+     3. `EC` family success `>= 0.95`；
+     4. `visual_loss_mean / fallback_mean` 长尾显著缩短，且不能靠超长 leader relocation “换”成功率。
+
+   **主线 3：效率主线 —— `CF` 上真正赢过强传统基线**
+   - **模块改进清单**：
+     1. `CGFL`（Certificate-Gated Fast Lane）：只在满足证书时提高 approach speed、放宽 contact gate、推迟 lock-assist 接管；
+     2. `No-Unnecessary-Relocation Rule`：在无遮挡、高净空、低航向差场景中抑制无意义的 leader relocation；
+     3. `Common-Case Predock Simplification`：减少 predock 路径上的冗余拐点和低速段；
+     4. `Cost-Aware Mode Scheduling`：对 `CF` 使用效率优先的 mode scheduling，而非困难场景同款保守阈值。
+   - **优先修改文件**：`docking/dock_skill.py`，必要时补 `docking/coop_docking.py` 的 common-case 评分项。
+   - **对应实验脚本**：
+     1. 代表场景：`scripts/run_p_minus1_stage1_suite.py --dataset-root data/dockbench_v1 ...`，重点看 `CF_L2`；
+     2. 批量回归：`scripts/run_p_minus1_stage2_batch.py --dataset-root data/dockbench_v1 ...`；
+     3. 可选 smoke：允许增加 `co-only` 回归脚本或 summary，但正式结论仍以 Stage-2 协议为准。
+   - **预期验收指标**：
+     1. `CF` / `Common-Feasible` 子集上达到“成功率非劣 + 平均 `T_done` 或平均 trajectory cost 至少改善 `5%`”；
+     2. overall 平均 `T_done` 先压到 `<=17s`，继续冲 `<=15s`；
+     3. fast lane 不得降低 `SC / FC / EC` 的 success，不得新增碰撞。
+
+   **主线 4：证据主线 —— 从描述性优势到统计性优势**
+   - **模块改进清单**：
+     1. `Paired Statistics`：对 success / time / cost 做 paired bootstrap / paired CI；
+     2. `Failure-Mode Stratification`：把失败按 `collision / fov_loss_unrecovered / geometric_deadlock / lock_condition_not_met` 分层统计；
+     3. `Mechanism-Targeted Ablation`：把 `A-NoStage`、`A-NoFunnelGate`、`A-NoMicroManeuver` 分别绑定到 `EC / FC / SC+EC` 子集；
+     4. `Belief-Gate Evidence Audit`：若 `A-NoBeliefGate` 仍无明显退化，必须新增 family 机制子集或明确下调该模块论断。
+   - **优先修改文件/脚本**：以 `scripts/run_p_minus1_stage2_batch.py` 为主；必要时补充 Stage-2.5 统计脚本，但正式结果口径仍需回写到 Stage-2 报告格式。
+   - **对应实验脚本**：
+     1. `scripts/run_p_minus1_stage2_batch.py --dataset-root data/dockbench_v1 ...`；
+     2. 必要时增加 `Stage-2.5 stats appendix` 脚本，但不得替代主报告。
+   - **预期验收指标**：
+     1. `EC` 扩展收益 CI 明确大于 `0`；
+     2. `A-NoStage` 在 `EC`、`A-NoFunnelGate` 在 `FC`、`A-NoMicroManeuver` 在 `SC/EC` 至少一项关键指标上出现稳定退化；
+     3. `Belief Gate` 若仍无显著性，必须在报告中明确降级为“当前证据不足”，并记录补 family 机制子集计划。
+
+   - **统一实验矩阵（四条主线共用）**：
+     1. `single-case repro`：只跑对应残余失败 / 代表场景，快速定位；
+     2. `family regression`：Stage-2 报告中重点看被修改 family 的 success / collision / time / fail_reason；
+     3. `full frozen test`：每一轮都必须跑完整 `test` split；
+     4. `challenge pressure test`：每两轮至少跑一次 `challenge`，防止只在 `test` 上过拟合；
+     5. `stage0 re-audit`：如果改动触及 staging / family 机制判据，必须重跑 `scripts/validate_dockbench_stage0.py`。
+   - **脚本约束**：
+     1. 允许增加 Stage-2.5 专用脚本，但正式结论文件必须继续产出到 Stage-2 兼容格式；
+     2. 所有新增脚本都必须显式区分 `tuning / test / challenge`，并把 seed / manifest 固定写入输出；
+     3. 不允许使用 `test` 上反复调参后的最好一次结果作为最终结论。
+   - **里程碑顺序（执行版）**：
+     1. `M1`：主线 1，先消灭碰撞；
+     2. `M2`：主线 2，消灭 `fov_loss_unrecovered`；
+     3. `M3`：主线 3，补 `CF` 竞争性；
+     4. `M4`：主线 4，补统计显著性与机制证据；
+     5. 只有在 `M1~M4` 全部满足 Stage-2.5 gate 后，才允许进入 Stage-3。
+   - **回归要求**：每完成一轮改动，都必须对 frozen `test` split 全量重跑，且对 `challenge` 子集做单独压力评估；若某一改动提升单个 family 但伤害总体安全/成功率，则视为未通过，不得带入 Stage-3。
+   - **Stage-3 前硬门槛**：未完成 Stage-2.5 的 base gate，不进入 Stage-3 多车实验。
+
 3. **Stage-3：多车单场景对接（单次验证）**
    - 创建 1 个带随机障碍的场景；多辆车自由分布（避免初始过近）。
    - 支持多车对接成列车/链式结构（可顺序对接，也可并发对接的子集，具体由基础支撑内部协调）。
@@ -142,6 +237,15 @@
 ### P-1.3 量化指标（建议门槛，可随平台能力微调）
 - Stage-1：单场景两车对接 **成功 1/1**，碰撞 **0**，最小净空 \(\ge 0.1m\)。
 - Stage-2：两车批量成功率 \(\ge 95\%\)，碰撞 **0**；对接平均耗时 \(\le 15s\)（或给出合理解释与曲线）。
+- **Stage-2.5（Stage-3 前 base gate）**：
+  1. frozen `test` split 上 overall 成功率建议 \(\ge 97.5\%\)，stretch goal 为 `48/48`；
+  2. overall 碰撞率必须回到 `0`；
+  3. `fov_loss_unrecovered` 在 `test` split 上必须压到 `0`；
+  4. overall 平均 `T_done` 建议先压到 \(\le 17s\)，最终冲击任务书原门槛 \(\le 15s\)；
+  5. `CF` / `Common-Feasible` 子集上，本方法相对最优强传统基线必须达到“成功率非劣 + 平均 `T_done` 或平均 trajectory cost 改善至少 `5%`”；stretch goal 为时间与代价双改善；
+  6. `FC` 与 `EC` family 的成功率建议都收敛到 \(\ge 95\%\)，且其主要失败模式不再是 `collision / fov_loss_unrecovered` 这类不可接受失效；
+  7. `challenge` 子集的 `co_bcfd` 成功率建议 \(\ge 50\%\)，stretch goal 为 \(\ge 2/3\)；
+  8. 关键结论必须补充 paired bootstrap / paired CI：至少覆盖 `EC` 扩展收益、`CF` 竞争性、`A-NoStage` 与 `A-NoFunnelGate / A-NoMicroManeuver` 的 targeted ablation 结论。
 - Stage-3：单场景多车对接 **成功 1/1**，碰撞 **0**，拓扑合法。
 - Stage-4：多车批量成功率 \(\ge 90\%\)（初期可放宽但需逐步收敛到 \(\ge 95\%\)），碰撞 **0**。
 - **共同可解子集约束**：Stage-1/2 报告必须包含至少 1 组/1 个子集，使得至少 1 个强传统基线具有稳定非零成功率；Stage-2 建议该强基线在 `Common-Feasible` 子集上的成功率 \(\ge 60\%\)，否则说明对比场景设计不充分。
@@ -174,35 +278,52 @@
 状态：`In Progress`
 
 更新（2026-03-06）：
-0. 新增 P-1.1B / P-1.2 Stage-0：两车 docking 场景标准与固定数据集冻结，规范书为 `DOCK_SCENARIO_STANDARD.md`；后续 Stage-1/2 必须基于该标准执行并反证其有效性。
-1. P-1.1 设计稿持续同步实现与实验：`DOCK.md`。
-2. Stage-1 已切换为**共同可解 + 能力扩展**双代表场景协议：
-   - Common-Feasible：`experiments/p_minus1_curated_scenes/common_test_seed7.json`
-   - Extension-Critical：`experiments/p_minus1_curated_scenes/extension_test_seed14.json`
-3. Stage-1/Stage-2 已统一到“同场景配对比较 + 强传统基线 + 能力匹配基线 + 关键消融”的协议：
-   - 协议文档：`artifacts/P_MINUS1_BASELINE_PROTOCOL.md`
-   - 基线/消融注册：`docking/p_minus1_baselines.py`
-4. 当前 Stage-2 采用**经当前代码实测验证**的 curated manifest：
-   - tuning：`common_tuning_seed111/112`
-   - test：`common_test_seed0/1/4/7` + `extension_test_seed14`
-   - 场景文件目录：`experiments/p_minus1_curated_scenes`
-5. 当前 Stage-2 主门槛在该 validated manifest 上已满足：
-   - `co_bcfd` overall 成功率 `1.000`
-   - overall 碰撞率 `0.000`
-   - overall 平均完成时间 `13.620s`
-   - strong common success `1.000`
-6. 当前能力扩展结论：在 `Extension-Critical` 子集（当前验证集 `n=1`）上，`co_bcfd` 成功率 `1.000`，最优强传统基线成功率 `0.000`。
-7. 产物：
-   - Stage-1 Suite 报告：`artifacts/P_MINUS1_STAGE1_SUITE_REPORT.md`
-   - Stage-1 Suite 数据：`artifacts/p_minus1_stage1_suite_results.json`
-   - Stage-2 报告：`artifacts/P_MINUS1_STAGE2_REPORT.md`
-   - Stage-2 数据：`artifacts/p_minus1_stage2_results.json`
-   - Stage-2 图表：`artifacts/p_minus1_stage2_success_heatmap.png`、`artifacts/p_minus1_stage2_subset_compare.png`、`artifacts/p_minus1_stage2_failure_clusters.png`、`artifacts/p_minus1_stage2_ablation_summary.png`
-8. 当前仍未完全收敛的项：
-   - `Common-Feasible` 子集上，`co_bcfd` 已达到成功率非劣，但相对最优强传统基线尚未形成 `T_done / cost` 的 `>=5%` 优势；P-1.3 的共同可解竞争性条款仍需继续补强；
-   - `Extension-Critical` validated test 集规模仍偏小（当前 `n=1`），需要继续扩展到多 seed 稳定批量；
-   - challenge 子集与 GIF 回放尚未重新生成；
-   - 在进入 Stage-3 前，仍需把扩展子集做厚，并补充 `switching-critical` 机制子集，避免只在窄验证集上成立。
+0. `P-1.1B` 与 `P-1.2 Stage-0` 已正式落地到 `DockBench-v1`：
+   - 数据集根目录：`data/dockbench_v1/`
+   - 生成脚本：`scripts/generate_dockbench_v1.py`
+   - split 冻结：`scripts/freeze_dockbench_v1_splits.py`
+   - Stage-0 审计：`scripts/validate_dockbench_stage0.py`
+   - 当前 Stage-0 审计结果：`data/dockbench_v1/dockbench_v1_stage0_audit.json`，`pass=True`。
+1. `P-1.1` 设计稿已持续同步到当前实现与实验：`DOCK.md`。
+2. Stage-1 已切换到 `DockBench-v1` 的 frozen representative protocol：
+   - `CF_L2 = DBv1-CF-L2-010`
+   - `SC_L2 = DBv1-SC-L2-026`
+   - `FC_L2 = DBv1-FC-L2-046`
+   - `EC_L2 = DBv1-EC-L2-065`
+   - Stage-1 报告：`artifacts/dockbench_stage1/P_MINUS1_STAGE1_SUITE_REPORT.md`
+   - Stage-1 数据：`artifacts/dockbench_stage1/p_minus1_stage1_suite_results.json`
+3. Stage-2 已切换到 frozen `test` split 的批量协议：
+   - Stage-2 报告：`artifacts/dockbench_stage2_fast/P_MINUS1_STAGE2_REPORT.md`
+   - Stage-2 数据：`artifacts/dockbench_stage2_fast/p_minus1_stage2_results.json`
+   - Stage-2 图表：`artifacts/dockbench_stage2_fast/p_minus1_stage2_success_heatmap.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_subset_compare.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_failure_clusters.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_ablation_summary.png`
+4. 当前 `co_bcfd` 的 Stage-2 主指标：
+   - overall `success_rate = 0.9583 (46/48)`；
+   - overall `collision_rate = 0.0208`；
+   - overall `avg_T_done = 20.10s`；
+   - `CF / SC / FC / EC` success 分别为 `1.000 / 1.000 / 0.9167 / 0.9167`。
+5. 当前已满足/已成立的条款：
+   - `P-1.1B` / `Stage-0` 的 family × difficulty × split 冻结与审计闭环；
+   - `Stage-1` 的共同可解代表 + 扩展能力代表验证；
+   - `Stage-2` 的 overall 成功率 `>=95%`；
+   - `Common-Feasible` 子集上强传统基线稳定非零成功；
+   - `Extension-Critical` 子集上 `co_bcfd` 对最优强基线的扩展收益门槛成立。
+6. Stage-2.5 当前完成情况（2026-03-07）：
+   - **已合入主实现**：`CGFL`（Certificate-Gated Fast Lane），对应代码在 `docking/dock_skill.py`；其目标是只在“无遮挡、高净空、无需 leader relocation”的共同可解 easy case 上提速，而不改变 `SC / FC / EC` 的主机制逻辑。
+   - **当前接受的回归结果**：见 `artifacts/stage25_final_co_only/co_only_summary.json`；overall 成功率保持 `0.9583`、碰撞率保持 `0.0208`，overall 平均完成时间从 `20.10s` 降到 `19.72s`，其中 `CF` family 平均完成时间从 `11.88s` 降到 `10.42s`。
+   - **failure-mode 分层统计已补齐**：新增脚本 `scripts/analyze_stage25_failure_modes.py`，当前主线残余失败已被压缩并明确定位为：`DBv1-FC-L3-052 / collision` 与 `DBv1-EC-L1-059 / fov_loss_unrecovered`；对应统计见 `artifacts/stage25_final_co_only/failure_mode_summary.json`。
+   - **M1 安全性主线进展**：已实现并验证一版最小作用域 `FC-L3` 安全闭环原型，在 `DBv1-FC-L3-052` 单案上可把 `collision` 拉回 `success`；但 frozen 全量 `test` split 的 `co-only` 回归仍会引入其它样本回退（见 `artifacts/stage25_m1_co_only/co_only_summary.json`），说明当前 M1 原型仍存在明显 overfit，不予合入主线。
+   - **M2 可见性主线进展**：已实现并验证一版最小作用域 `EC-L1` 可见性回退原型，在 `DBv1-EC-L1-059` 单案上可把 `fov_loss_unrecovered` 拉回 `success`；但一旦放到 frozen 全量 `test` split，仍会连带伤害 `SC/EC` 其它样本，因此同样不予合入主线。
+   - **当前结论**：本轮已完成“failure-mode 分层统计 → 单案复现 → frozen 全量 test 回归”的闭环验证，并证明了两个 hard case 都具有**局部可修复性**；但由于全量回归仍不达标，当前主线继续保持“`CGFL` 已合入、`M1/M2` 原型未合入”的状态。
+7. 当前仍未完全收敛的项：
+   - overall `collision_rate` 仍未压到 `0`（残余失败仍包含 `DBv1-FC-L3-052`）；
+   - overall `avg_T_done` 仍高于 `15s`，尤其 `SC / EC` family 耗时偏大；
+   - `DBv1-EC-L1-059` 仍未被稳定修复；
+   - `Common-Feasible` 子集上，`co_bcfd` 已通过 `CGFL` 缩小时间差距，但相对最优强传统基线的 `trajectory_cost >= 5%` 优势仍未形成；
+   - Stage-2.5 的 `RCS / SSTF` 还缺一套“不过拟合 tuning、且不会伤害全量 test split”的更稳健实现。
+8. 结论：
+   - 以“为上层策略层提供可复现、可批量、可 family 分解的双车 docking 基准”为目标，当前 `P-1.1B + P-1.2 Stage-0/1/2` 仍保持可用状态；
+   - 以“Stage-3 前先把 `co_bcfd` 冲到全指标更优”为目标，当前已完成 **第一轮可控增益落地（`CGFL`）**，但 Stage-2.5 尚未达成最终 gate；
+   - 在进入更高置信度的 Stage-3 多车扩展前，仍需继续围绕 `FC-L3` 安全闭环与 `EC-L1` 可见性回退闭环做下一轮迭代。
 
 ---
 
