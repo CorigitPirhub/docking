@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .config import ControlConfig, VehicleConfig
-from .math_utils import angle_diff, clamp
+from .math_utils import angle_diff, clamp, wrap_angle
 from .types import ControlCommand, VehicleState
 
 
@@ -15,6 +15,20 @@ class PathTrackingController:
     vehicle_cfg: VehicleConfig
     control_cfg: ControlConfig
     steering_mode: str = "pure_pursuit"  # pure_pursuit | stanley
+
+    def _virtual_reverse_state(self, state: VehicleState) -> VehicleState:
+        return VehicleState(
+            vehicle_id=int(state.vehicle_id),
+            x=float(state.x),
+            y=float(state.y),
+            yaw=float(wrap_angle(float(state.yaw) + math.pi)),
+            v=float(-state.v),
+            delta=float(-state.delta),
+            mode=state.mode,
+        )
+
+    def _devirtualize_reverse_command(self, cmd: ControlCommand) -> ControlCommand:
+        return ControlCommand(accel=float(-cmd.accel), steer_rate=float(-cmd.steer_rate))
 
     def _nearest_index(self, state: VehicleState, path_xy: np.ndarray) -> int:
         d = np.linalg.norm(path_xy - state.xy(), axis=1)
@@ -91,6 +105,10 @@ class PathTrackingController:
         return clamp(delta, -dmax, dmax)
 
     def track_path(self, state: VehicleState, path_xy: np.ndarray, target_speed: float) -> ControlCommand:
+        if float(target_speed) < -1e-6:
+            virtual_state = self._virtual_reverse_state(state)
+            cmd_virtual = self.track_path(virtual_state, path_xy, float(-target_speed))
+            return self._devirtualize_reverse_command(cmd_virtual)
         if len(path_xy) < 2:
             return self.track_point(state, state.x + 1.0, state.y, state.yaw, target_speed)
 
@@ -112,6 +130,10 @@ class PathTrackingController:
         target_yaw: float,
         target_speed: float,
     ) -> ControlCommand:
+        if float(target_speed) < -1e-6:
+            virtual_state = self._virtual_reverse_state(state)
+            cmd_virtual = self.track_point(virtual_state, target_x, target_y, float(wrap_angle(float(target_yaw) + math.pi)), float(-target_speed))
+            return self._devirtualize_reverse_command(cmd_virtual)
         vec = np.array([target_x - state.x, target_y - state.y], dtype=float)
         dist = float(np.linalg.norm(vec))
         desired_yaw = math.atan2(vec[1], vec[0]) if dist > 1e-6 else target_yaw
@@ -132,7 +154,7 @@ class PathTrackingController:
         return ControlCommand(accel=accel, steer_rate=steer_rate)
 
     def _speed_accel(self, v: float, v_ref: float) -> float:
-        v_ref = clamp(v_ref, 0.0, self.vehicle_cfg.max_speed)
+        v_ref = clamp(v_ref, -self.vehicle_cfg.max_reverse_speed, self.vehicle_cfg.max_speed)
         accel = self.control_cfg.speed.kp * (v_ref - v)
         accel = clamp(accel, -self.vehicle_cfg.max_decel, self.control_cfg.speed.max_accel_cmd)
         return accel

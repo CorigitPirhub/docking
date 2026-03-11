@@ -10,6 +10,8 @@ import numpy as np
 
 from .collision import CollisionEngine, obstacle_polygon, polygon_distance, polygons_intersect
 from .config import Config
+from .math_utils import clamp
+from .kinematics import VehicleGeometry
 from .dockbench import (
     DIFFICULTIES,
     FAMILIES,
@@ -247,6 +249,59 @@ def _sample_background_obstacles(
         if np.linalg.norm(center - follower.xy()) < 2.2:
             continue
         _append_if_valid(cfg, collision, items, _role_obstacle(x, y, w, h, yaw, "background"), leader, follower)
+
+
+def _rect_polygon(x0: float, x1: float, y0: float, y1: float) -> list[list[float]]:
+    return [
+        [float(x1), float(y1)],
+        [float(x1), float(y0)],
+        [float(x0), float(y0)],
+        [float(x0), float(y1)],
+    ]
+
+
+def _point_in_poly(point: np.ndarray, poly: list[list[float]]) -> bool:
+    x = float(point[0])
+    y = float(point[1])
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        xi, yi = float(poly[i][0]), float(poly[i][1])
+        xj, yj = float(poly[j][0]), float(poly[j][1])
+        cond = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / max(yj - yi, 1e-9) + xi)
+        if cond:
+            inside = not inside
+        j = i
+    return bool(inside)
+
+
+def _corridor_sample_inside(point: np.ndarray, corridor_polygons: list[list[list[float]]]) -> bool:
+    return any(_point_in_poly(point, poly) for poly in corridor_polygons)
+
+
+def _segment_outside_ratio(p0: np.ndarray, p1: np.ndarray, corridor_polygons: list[list[list[float]]], *, n: int = 61) -> float:
+    alphas = np.linspace(0.0, 1.0, int(max(n, 2)), dtype=float)
+    outside = 0
+    for alpha in alphas:
+        pt = (1.0 - alpha) * np.asarray(p0, dtype=float) + alpha * np.asarray(p1, dtype=float)
+        if not _corridor_sample_inside(pt, corridor_polygons):
+            outside += 1
+    return float(outside / max(len(alphas), 1))
+
+
+def _lane_fidelity_audit(
+    follower_start: VehicleState,
+    follower_goal: VehicleState,
+    corridor_polygons: list[list[list[float]]],
+    *,
+    legal_path_len_m: float,
+) -> tuple[bool, float]:
+    direct = float(np.linalg.norm(follower_goal.xy() - follower_start.xy()))
+    shortcut_gap = float(max(0.0, legal_path_len_m - direct))
+    outside_ratio = _segment_outside_ratio(follower_start.xy(), follower_goal.xy(), corridor_polygons)
+    geodesic_ratio = float(legal_path_len_m / max(direct, 1e-6))
+    lane_fidelity = bool(shortcut_gap >= 0.75 and (outside_ratio >= 0.18 or geodesic_ratio >= 1.12))
+    return lane_fidelity, float(shortcut_gap)
 
 
 def _generate_cf(cfg: Config, rng: np.random.Generator, *, difficulty: str, seed: int, split: str) -> tuple[VehicleState, VehicleState, list[RoleObstacle], float]:
@@ -552,6 +607,176 @@ def _generate_ec(cfg: Config, rng: np.random.Generator, *, difficulty: str, seed
     return leader, follower, items, base_time
 
 
+def _generate_lc(cfg: Config, rng: np.random.Generator, *, difficulty: str, seed: int, split: str) -> tuple[VehicleState, VehicleState, list[RoleObstacle], float, dict[str, Any]]:
+    lvl = str(difficulty).upper()
+    split_kind = str(split).lower()
+    collision = CollisionEngine(cfg.vehicle, cfg.safety)
+    items: list[RoleObstacle] = []
+
+    lane_y = float(rng.uniform(-1.8, 1.8))
+    x_left = -16.5
+    x_right = 8.5
+    wall_t = 0.34
+    lane_width = {"L1": 2.15, "L2": 1.75, "L3": 1.45}[lvl]
+    bay_extra = {"L1": 1.95, "L2": 2.35, "L3": 3.20}[lvl]
+    pocket_len = {"L1": 2.8, "L2": 3.3, "L3": 4.4}[lvl]
+    heading_ranges = {"L1": (4.0, 14.0), "L2": (18.0, 34.0), "L3": (42.0, 68.0)}
+    d0_ranges = {"L1": (6.2, 7.8), "L2": (6.8, 8.6), "L3": (7.2, 9.2)}
+    if split_kind == 'challenge':
+        lane_width = max(0.95, lane_width - 0.08)
+        bay_extra += 0.16
+    elif split_kind == 'tuning':
+        lane_width += 0.08
+    branch_sign = float(rng.choice([-1.0, 1.0]))
+    pocket_mid_x = float(rng.uniform(3.5, 6.0))
+    pocket_x0 = float(pocket_mid_x - 0.5 * pocket_len)
+    pocket_x1 = float(pocket_mid_x + 0.5 * pocket_len)
+    bay_width = float(lane_width + bay_extra)
+
+    lower_y = float(lane_y - 0.5 * lane_width)
+    upper_y = float(lane_y + 0.5 * lane_width)
+    bay_upper = float(lane_y + 0.5 * bay_width)
+    bay_lower = float(lane_y - 0.5 * bay_width)
+
+    if branch_sign > 0.0:
+        walls = [
+            _role_obstacle(0.5 * (x_left + x_right), lane_y - 0.5 * lane_width - 0.5 * wall_t, x_right - x_left, wall_t, 0.0, 'channel'),
+            _role_obstacle(0.5 * (x_left + pocket_x0), lane_y + 0.5 * lane_width + 0.5 * wall_t, pocket_x0 - x_left, wall_t, 0.0, 'channel'),
+            _role_obstacle(0.5 * (pocket_x1 + x_right), lane_y + 0.5 * lane_width + 0.5 * wall_t, x_right - pocket_x1, wall_t, 0.0, 'channel'),
+            _role_obstacle(pocket_mid_x, bay_upper + 0.5 * wall_t, pocket_len, wall_t, 0.0, 'hybrid'),
+        ]
+        bay_y_lo = float(upper_y + 0.34)
+        bay_y_hi = float(bay_upper - 0.34)
+        corridor_polygons = [
+            _rect_polygon(x_left, x_right, lower_y, upper_y),
+            _rect_polygon(pocket_x0, pocket_x1, upper_y, bay_upper),
+        ]
+    else:
+        walls = [
+            _role_obstacle(0.5 * (x_left + x_right), lane_y + 0.5 * lane_width + 0.5 * wall_t, x_right - x_left, wall_t, 0.0, 'channel'),
+            _role_obstacle(0.5 * (x_left + pocket_x0), lane_y - 0.5 * lane_width - 0.5 * wall_t, pocket_x0 - x_left, wall_t, 0.0, 'channel'),
+            _role_obstacle(0.5 * (pocket_x1 + x_right), lane_y - 0.5 * lane_width - 0.5 * wall_t, x_right - pocket_x1, wall_t, 0.0, 'channel'),
+            _role_obstacle(pocket_mid_x, bay_lower - 0.5 * wall_t, pocket_len, wall_t, 0.0, 'hybrid'),
+        ]
+        bay_y_lo = float(bay_lower + 0.34)
+        bay_y_hi = float(lower_y - 0.34)
+        corridor_polygons = [
+            _rect_polygon(x_left, x_right, lower_y, upper_y),
+            _rect_polygon(pocket_x0, pocket_x1, bay_lower, lower_y),
+        ]
+    for obs in walls:
+        if not _obstacle_in_bounds(cfg, obs.obstacle):
+            raise RuntimeError('LC lane wall out of bounds')
+        items.append(obs)
+
+    corridor_centerline = [[float(x_left), float(lane_y)], [float(pocket_mid_x), float(lane_y)], [float(x_right), float(lane_y)]]
+
+    heading_gap = float(rng.uniform(*heading_ranges[lvl]))
+    d0 = float(rng.uniform(*d0_ranges[lvl]))
+    follower = VehicleState(
+        vehicle_id=1,
+        x=float(pocket_mid_x - d0),
+        y=float(lane_y + rng.uniform(-0.08, 0.08)),
+        yaw=0.0,
+        v=0.0,
+        delta=0.0,
+        mode=VehicleMode.DOCKING,
+    )
+    leader_x_pad = 0.72
+    depth_ratio = float(clamp(0.52 + 0.30 * ((heading_gap - heading_ranges[lvl][0]) / max(heading_ranges[lvl][1] - heading_ranges[lvl][0], 1e-6)), 0.48, 0.88))
+    target_y = float((bay_y_lo + bay_y_hi) * 0.5 + (depth_ratio - 0.5) * (bay_y_hi - bay_y_lo))
+    leader = None
+    leader_clear_req = {"L1": 0.22, "L2": 0.20, "L3": 0.18}[lvl]
+    wall_obstacles = [item.obstacle for item in items]
+    for _ in range(220):
+        cand = VehicleState(
+            vehicle_id=2,
+            x=float(rng.uniform(pocket_x0 + leader_x_pad, pocket_x1 - leader_x_pad)),
+            y=float(clamp(target_y + rng.normal(0.0, 0.10), min(bay_y_lo, bay_y_hi), max(bay_y_lo, bay_y_hi))),
+            yaw=float(branch_sign * math.radians(heading_gap)),
+            v=0.0,
+            delta=0.0,
+            mode=VehicleMode.FREE,
+        )
+        if collision.in_collision(cand, wall_obstacles, []):
+            continue
+        if collision.min_clearance_vehicle_obstacles(cand, wall_obstacles) < float(leader_clear_req):
+            continue
+        leader = cand
+        break
+    if leader is None:
+        raise RuntimeError('LC leader collides with lane walls')
+
+    if not (_in_bounds(cfg, leader, 0.8) and _in_bounds(cfg, follower, 0.8)):
+        raise RuntimeError('LC vehicles out of bounds')
+    if collision.in_collision(follower, [item.obstacle for item in items], []):
+        raise RuntimeError('LC follower collides with lane walls')
+
+    reverse_turn_required = float(clamp(0.65 * (heading_gap - 8.0) / 34.0 + 0.35 * max(0.0, 1.80 - lane_width) / 0.80, 0.0, 1.0))
+    stage_anchor_xy = [
+        float(pocket_mid_x),
+        float(lane_y + branch_sign * min(0.18 * lane_width, 0.30)),
+    ]
+    leader_seg1 = np.linspace(0.0, 1.0, 7, dtype=float)
+    leader_seg2 = np.linspace(0.0, 1.0, 5, dtype=float)
+    leader_stage_path_xy = [[float(leader.x), float(leader.y)]]
+    leader_stage_path_xy.extend(
+        [[float(leader.x), float((1.0 - a) * leader.y + a * stage_anchor_xy[1])] for a in leader_seg1[1:]]
+    )
+    leader_stage_path_xy.extend(
+        [[float((1.0 - a) * leader.x + a * stage_anchor_xy[0]), float(stage_anchor_xy[1])] for a in leader_seg2[1:]]
+    )
+    geom = VehicleGeometry(cfg.vehicle)
+    predock_standoff = float(max(0.70, float(cfg.docking.stage_switch_distance) - 0.55))
+    anchor_state = VehicleState(
+        vehicle_id=2,
+        x=float(stage_anchor_xy[0]),
+        y=float(stage_anchor_xy[1]),
+        yaw=0.0,
+        v=0.0,
+        delta=0.0,
+        mode=VehicleMode.FREE,
+    )
+    heading = np.array([1.0, 0.0], dtype=float)
+    predock_center = geom.rear_hitch(anchor_state) - heading * float(geom.front_hitch_x + predock_standoff)
+    follower_seg1 = np.linspace(0.0, 1.0, 9, dtype=float)
+    follower_seg2 = np.linspace(0.0, 1.0, 5, dtype=float)
+    follower_stage_path_xy = [[float(follower.x), float(follower.y)]]
+    follower_stage_path_xy.extend(
+        [[float((1.0 - a) * follower.x + a * predock_center[0]), float((1.0 - a) * follower.y + a * lane_y)] for a in follower_seg1[1:]]
+    )
+    follower_stage_path_xy.extend(
+        [[float(predock_center[0]), float((1.0 - a) * lane_y + a * stage_anchor_xy[1])] for a in follower_seg2[1:]]
+    )
+    lane_meta = {
+        'enabled': True,
+        'category': 'LC',
+        'corridor_polygons': corridor_polygons,
+        'centerline': corridor_centerline,
+        'width_profile_m': [float(lane_width), float(bay_width), float(lane_width)],
+        'branch_count': 1,
+        'bottleneck_ratio': float(lane_width / max(bay_width, 1e-6)),
+        'corridor_width_min_m': float(lane_width),
+        'corridor_turn_deg_max': float(min(65.0, 14.0 + 0.72 * heading_gap)),
+        'drivable_area_ratio': float(sum(abs((poly[0][0]-poly[2][0]) * (poly[0][1]-poly[2][1])) for poly in corridor_polygons) / (float(cfg.environment.width) * float(cfg.environment.height))),
+        'leader_reverse_turn_required': reverse_turn_required,
+        'leader_micro_adjust_budget_m': float(0.34 + 0.022 * heading_gap + 0.48 * max(0.0, 1.50 - lane_width)),
+        'heading_gap_regime': ('small' if heading_gap < 15.0 else ('medium' if heading_gap < 38.0 else 'large')),
+        'bay_depth_m': float(0.5 * bay_extra),
+        'leader_stage_anchor_xy': stage_anchor_xy,
+        'leader_stage_anchor_yaw': 0.0,
+        'leader_stage_path_xy': leader_stage_path_xy,
+        'follower_stage_path_xy': follower_stage_path_xy,
+        'corridor_entry_xy': [float(pocket_mid_x), float(lane_y)],
+    }
+    base_time = {"L1": 24.0, "L2": 30.0, "L3": 36.0}[lvl]
+    if split_kind == 'test':
+        base_time += 2.0
+    elif split_kind == 'challenge':
+        base_time += 3.0
+    return leader, follower, items, base_time, lane_meta
+
+
 def _relaxed_tuning_label(family: str, descriptors: dict[str, float], direct_los_blocked: bool) -> bool:
     fam = str(family).upper()
     if fam == "SC":
@@ -560,6 +785,13 @@ def _relaxed_tuning_label(family: str, descriptors: dict[str, float], direct_los
         return bool(descriptors["d0_m"] >= 5.0 and descriptors["dock_zone_clearance_m"] <= 1.20 and descriptors["detour_factor"] <= 1.25 and descriptors["staging_shift_required_m"] <= 0.50)
     if fam == "EC":
         return bool(direct_los_blocked and descriptors["staging_shift_required_m"] >= 0.80 and descriptors["detour_factor"] >= 1.18)
+    if fam == "LC":
+        return bool(
+            descriptors.get('corridor_width_min_m', 0.0) > 0.0
+            and descriptors.get('off_lane_shortcut_gap_m', 0.0) >= 0.75
+            and descriptors.get('leader_micro_adjust_budget_m', 0.0) >= 0.35
+            and descriptors.get('leader_reverse_turn_required', 0.0) >= 0.05
+        )
     return False
 
 
@@ -571,13 +803,19 @@ def generate_candidate_scene(cfg: Config, *, family: str, difficulty: str, split
         "SC": _generate_sc,
         "FC": _generate_fc,
         "EC": _generate_ec,
+        "LC": _generate_lc,
     }
     if fam not in family_generators:
         raise KeyError(f"unsupported family {family}")
     for local_attempt in range(300):
         rng = np.random.default_rng(int(seed) + 97 * local_attempt)
         try:
-            leader, follower, role_obstacles, max_time_s = family_generators[fam](cfg, rng, difficulty=lvl, seed=int(seed) + local_attempt, split=str(split))
+            generated = family_generators[fam](cfg, rng, difficulty=lvl, seed=int(seed) + local_attempt, split=str(split))
+            if len(generated) == 5:
+                leader, follower, role_obstacles, max_time_s, generator_aux = generated
+            else:
+                leader, follower, role_obstacles, max_time_s = generated
+                generator_aux = {}
         except RuntimeError:
             continue
         collision = CollisionEngine(cfg.vehicle, cfg.safety)
@@ -591,12 +829,56 @@ def generate_candidate_scene(cfg: Config, *, family: str, difficulty: str, split
             continue
         if np.linalg.norm(leader.xy() - follower.xy()) < 4.5:
             continue
-        clearance_req = 0.15 if fam == "EC" else (0.24 if fam == "FC" else 0.35)
+        clearance_req = 0.12 if fam == "LC" else (0.15 if fam == "EC" else (0.24 if fam == "FC" else 0.35))
         if collision.min_clearance_vehicle_obstacles(leader, obstacles) < clearance_req:
             continue
         if collision.min_clearance_vehicle_obstacles(follower, obstacles) < max(0.24, clearance_req):
             continue
-        descriptors, aux = compute_descriptors(cfg, seed=int(seed), leader=leader, follower=follower, obstacles=obstacles, obstacle_roles=roles, family=fam, difficulty=lvl)
+        descriptors, aux = compute_descriptors(
+            cfg,
+            seed=int(seed),
+            leader=leader,
+            follower=follower,
+            obstacles=obstacles,
+            obstacle_roles=roles,
+            family=fam,
+            difficulty=lvl,
+            lane_meta=dict(generator_aux),
+        )
+        if fam == 'LC':
+            lane_payload = dict(aux.get('lane', {}))
+            entry_xy = np.asarray(lane_payload.get('corridor_entry_xy', [leader.x, leader.y]), dtype=float)
+            anchor_xy = np.asarray(lane_payload.get('leader_stage_anchor_xy', [leader.x, leader.y]), dtype=float)
+            legal_len = float(
+                np.linalg.norm(follower.xy() - entry_xy)
+                + np.linalg.norm(entry_xy - anchor_xy)
+                + np.linalg.norm(anchor_xy - leader.xy())
+            )
+            nominal_goal = VehicleState(
+                vehicle_id=int(follower.vehicle_id),
+                x=float(leader.x),
+                y=float(leader.y),
+                yaw=0.0,
+                v=0.0,
+                delta=0.0,
+                mode=follower.mode,
+            )
+            lane_fidelity, shortcut_gap = _lane_fidelity_audit(
+                follower_start=follower,
+                follower_goal=nominal_goal,
+                corridor_polygons=list(lane_payload.get('corridor_polygons', [])),
+                legal_path_len_m=float(legal_len),
+            )
+            stage_shift = float(np.linalg.norm(anchor_xy - leader.xy()))
+            lane_payload['off_lane_shortcut_gap_m'] = float(shortcut_gap)
+            lane_payload['lane_fidelity'] = bool(lane_fidelity)
+            lane_payload['leader_micro_adjust_budget_m'] = float(max(lane_payload.get('leader_micro_adjust_budget_m', 0.0), stage_shift + np.linalg.norm(anchor_xy - entry_xy)))
+            aux = dict(aux)
+            aux['lane'] = lane_payload
+            aux['lane_fidelity'] = bool(lane_fidelity)
+            descriptors['off_lane_shortcut_gap_m'] = float(shortcut_gap)
+            descriptors['leader_micro_adjust_budget_m'] = float(lane_payload['leader_micro_adjust_budget_m'])
+            descriptors['staging_shift_required_m'] = float(stage_shift)
         quality = quality_record(
             family=fam,
             difficulty=lvl,
@@ -604,6 +886,7 @@ def generate_candidate_scene(cfg: Config, *, family: str, difficulty: str, split
             direct_los_blocked=bool(aux["direct_los_blocked"]),
             existing_cell_descriptors=existing_cell_descriptors,
             cell_fill_ratio=float(cell_fill_ratio),
+            lane_fidelity=bool(aux.get('lane_fidelity', True)),
         )
         relaxed_ok = bool(str(split).lower() == "tuning" and _relaxed_tuning_label(fam, descriptors, bool(aux["direct_los_blocked"])))
         if not bool(quality["valid"]):
@@ -614,9 +897,9 @@ def generate_candidate_scene(cfg: Config, *, family: str, difficulty: str, split
             quality = dict(quality)
             quality["label_fidelity"] = True
             quality["scene_quality_score"] = max(float(quality["scene_quality_score"]), 0.72)
-        min_diversity = 0.02 if float(cell_fill_ratio) < 0.67 else 0.01
-        if fam == "EC":
-            min_diversity = min(min_diversity, 0.008)
+        min_diversity = 0.015 if float(cell_fill_ratio) < 0.67 else 0.008
+        if fam in {"SC", "EC", "LC"}:
+            min_diversity = min(min_diversity, 0.006)
         if existing_cell_descriptors and float(quality["raw_diversity_distance"]) < min_diversity:
             continue
         return CandidateScene(
@@ -637,8 +920,27 @@ def generate_candidate_scene(cfg: Config, *, family: str, difficulty: str, split
 
 def build_dockbench_v1(cfg: Config, *, root: str | Path | None = None, base_seed: int = 20260306) -> dict[str, Any]:
     ds_root = dataset_root(root)
+    ds_root.mkdir(parents=True, exist_ok=True)
     scene_dir = ds_root / "scenes"
+    if scene_dir.exists():
+        for scene_path in scene_dir.glob('*.json'):
+            scene_path.unlink()
     scene_dir.mkdir(parents=True, exist_ok=True)
+    for stale_name in (
+        'dockbench_v1_manifest.json',
+        'dockbench_v1_split_tuning.json',
+        'dockbench_v1_split_test.json',
+        'dockbench_v1_split_challenge.json',
+        'dockbench_v1_representatives.json',
+        'dockbench_v1_quality_report.json',
+        'dockbench_v1_generation_summary.json',
+        'dockbench_v1_split_freeze_summary.json',
+        'dockbench_v1_stage0_audit.json',
+        'DOCKBENCH_V1_STAGE0_AUDIT.md',
+    ):
+        stale_path = ds_root / stale_name
+        if stale_path.exists():
+            stale_path.unlink()
     records: list[DockBenchSceneSpec] = []
     representatives: dict[str, DockBenchSceneSpec] = {}
     quality_summary: dict[str, Any] = {
@@ -740,7 +1042,7 @@ def build_dockbench_v1(cfg: Config, *, root: str | Path | None = None, base_seed
             }
             rep_key = f"{family}_{difficulty}"
             test_l2 = next((record for record in cell_records if record.split == "test"), cell_records[0])
-            if rep_key in {"CF_L2", "SC_L2", "FC_L2", "EC_L2"}:
+            if rep_key in {"CF_L2", "SC_L2", "FC_L2", "EC_L2", "LC_L2"}:
                 representatives[rep_key] = test_l2
 
     save_manifest_files(ds_root, records=records, representatives=representatives, quality_report=quality_summary)

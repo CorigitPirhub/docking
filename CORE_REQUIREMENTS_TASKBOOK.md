@@ -25,6 +25,7 @@
 4. **近场微机动规划器（Parking-like Planner / BR-SMPC）**：支持“倒车-对齐-再前进”的非凸机动（MPPI/CEM/HybridA* 等均可），用于把系统状态拉入捕获域并推进到锁定域。
 5. **异常回退（Fallback/Recovery）**：视觉丢失、FOV 脱离、局部不可行时，自动回退到全局/重规划；必要时重新 staging。
 6. **统一安全过滤（Safety Projection）**：对任意名义控制输出施加碰撞/净空/执行器约束投影，保证零碰撞与最小净空要求。
+7. **统一证书场（Certificate Field）**：P-1.1/论文口径中，不再把 `CGFL / TVT / VPCR / PTCC` 叙述成四个并列工程模块；它们必须被统一为同一 Docking Skill 的证书化实现。推荐将其收敛为三个证书坐标：`进展证书`（吸收 `CGFL + PTCC`）、`终端证书`（吸收 `TVT + terminal capture boost + CTP`）、`可见性证书`（吸收 `VPCR`），并由同一个 belief-consistent capture-funnel 策略按证书值自适应切换/投影。
 
 ### P-1.1B DockBench 场景标准与数据集冻结（P-1.2 前置阶段）
 > **规范书**：`DOCK_SCENARIO_STANDARD.md`
@@ -32,22 +33,40 @@
 在进入 P-1.2 的 Stage-1/Stage-2 之前，必须先冻结 docking 专用场景标准与固定数据集 `DockBench-v1`。该阶段不是“补充文档”，而是正式前置任务，后续所有两车实验必须基于该标准执行。
 
 1. **建立两车 docking 的四层场景标准**：采用 `abstract -> logical -> concrete -> audit` 四层结构，避免“随机地图 + 人工挑 seed”。
-2. **冻结场景 family 与 difficulty 体系**：至少固定 `CF / SC / FC / EC` 四类 family，并引入 `L1 / L2 / L3` 难度等级；所有 P-1.2 报告必须按 family 口径汇总。
-3. **冻结固定数据集与 split**：正式 benchmark 使用固定 concrete scene 数据集，不得每次重新随机采样 test scenes；推荐 `DockBench-v1 = 72` 个 concrete scenes，采用 `tuning / test / challenge` 三段 split。
+2. **冻结场景 family 与 difficulty 体系**：固定 `CF / SC / FC / EC / LC` 五类 family，并引入 `L1 / L2 / L3` 难度等级；所有 P-1.2 报告必须按 family 口径汇总。
+3. **冻结固定数据集与 split**：正式 benchmark 使用固定 concrete scene 数据集，不得每次重新随机采样 test scenes；正式版 `DockBench-v1 = 90` 个 concrete scenes，采用 `tuning / test / challenge` 三段 split（`15 / 60 / 15`）。
 4. **冻结统一 JSON schema 与 manifest**：每个场景必须包含 `scene_id / split / family / difficulty / 车辆初始状态 / 障碍物几何与 role / descriptors / quality / audit` 等字段，并产出 manifest 与 split 清单。
 5. **障碍物分布采用“角色化拓扑”而非仅按数量计数**：障碍应区分 `screen / channel / dock_zone / background / hybrid` 等角色，并按 `corridor / dock-zone / background` 三个任务相关区域统计特征。
-6. **建立场景质量评估器（Scenario Quality Evaluator）**：至少包含 `validity`、`label fidelity`、`diversity`、`balance` 四类指标；同时增加闭环审计，确认 family 标签与真实基础支撑执行一致。
-7. **建立 family admission 规则**：
+6. **新增独立场景类别 `LC (Lane-Constrained)`**：`lane-constrained` 不是所有场景都附带的一条正交轴，而是必须单独设计的一类正式场景类别。此类场景的核心不是“两车之间被障碍物简单阻隔”，而是**车辆的可行规划空间被车道/走廊宽度严格限制**，后车不能通过大幅度绕行在整张地图上任意找路。
+7. **明确 `LC` 类别的核心研究目的**：`LC` 的设计必须突出“**初始航向角差**在通道约束下对对接难度的显著影响”。
+   - 当两车初始航向角差较小时，对接应显著容易；
+   - 当两车初始航向角差较大时，由于 follower 不能通过巨大转弯和自由绕行来修正几何关系，对接应显著困难；
+   - 因而 `LC` 场景的关键不是 follower 的大范围绕障，而是 **Leader 必须学会倒车转弯、前后切换、带转角微调等协同微机动** 来主动创造 docking-friendly pose。
+8. **冻结 `LC` 场景的车道拓扑与可行域 schema**：对 `LC` concrete scene，必须在 JSON schema 中显式给出 `drivable corridor` 的结构化表征（如 `corridor polygons / centerline / lane graph / bottleneck segments / passing bay / merge-diverge` 之一或组合），并给出“可行驶区域”与“非可行驶区域”的明确定义；scene audit 必须能够据此判断车辆轨迹是否发生 `off-lane shortcut`。
+9. **冻结 `LC` 场景的关键 descriptors**：除现有 descriptors 外，`LC` 至少必须显式冻结：`corridor_width_min_m / width_profile / corridor_turn_deg_max / bottleneck_ratio / heading_diff_deg / leader_reverse_turn_required / leader_micro_adjust_budget_m / off_lane_shortcut_gap_m`。其中 `heading_diff_deg` 与 `leader_reverse_turn_required` 是 `LC` 难度分级的核心描述量。
+10. **建立 `LC` 的难度分级与 admission 条件**：`LC-L1/L2/L3` 必须围绕“航向差 + 通道宽度 + Leader 微调需求”来定义，而不是简单复用原 family 的 admission 规则。至少要求：
+   - `LC-L1`：航向差较小，Leader 仅需小幅位姿调整；
+   - `LC-L2`：航向差中等，Leader 需要显式前进/后退切换或带转角微调；
+   - `LC-L3`：航向差大，Leader 需要倒车转弯等更复杂协同微机动才能把系统送入可对接盆地。
+11. **建立车道忠实度审计（Lane Fidelity Audit）**：对于声明为 `LC` 的场景，必须增加专门审计：
+   - 审计对象不是“整张图的 polygon 自由空间”，而是 `corridor geodesic / lane graph` 所定义的合法 lane-follow 路径；
+   - follower 若脱离车道约束便可显著缩短路径，则该场景才算“车道约束有效”；
+   - `lane_fidelity` 必须以 `off_lane_shortcut_gap_m` 为主量，结合 `outside_ratio` 或 `geodesic inflation ratio` 判定，而不是只靠单一 polygon 内外测试；
+   - 若存在明显自由空间捷径使 follower 可绕开车道瓶颈，则该场景必须被判为 `lane_fidelity = false` 并剔除。
+12. **建立场景质量评估器（Scenario Quality Evaluator）**：至少包含 `validity`、`label fidelity`、`diversity`、`balance` 四类指标；同时增加闭环审计，确认 family 标签与真实基础支撑执行一致。
+13. **建立 family / category admission 规则**：
    - `CF / SC / FC`：至少 1 个强传统基线在对应 `tuning` cell 上必须具备稳定非零成功率；
-   - `EC`：必须体现 cooperative staging 带来的可解域扩展，不能只是“无解场景”。
-8. **建立阶段耦合关系**：P-1.2 Stage-1 的代表场景、Stage-2 的批量对比、消融实验与 challenge 复现，全部必须从 frozen dataset 中读取，不允许临时手工替换正式 test scene。
+   - `EC`：必须体现 cooperative staging 带来的可解域扩展，不能只是“无解场景”；
+   - `LC`：必须体现“航向差增大 → follower 自由绕行受限 → 对 Leader 倒车转弯微调需求显著上升”的机制，不能退化成普通自由空间场景。
+14. **建立阶段耦合关系**：P-1.2 Stage-1 的代表场景、Stage-2 的批量对比、消融实验与 challenge 复现，全部必须从 frozen dataset 中读取，不允许临时手工替换正式 test scene。
 
 **P-1.1B 验收要求**
-- 产出正式规范书：`DOCK_SCENARIO_STANDARD.md`
-- 产出固定 split 与 manifest 文档/文件名规范
-- 给出每个 family 的 descriptor 阈值或 admission 条件
-- 给出场景质量评估器定义与打分/过滤逻辑
-- 明确 P-1.2 Stage-1/Stage-2 如何使用并验证该标准
+- 产出正式规范书：`DOCK_SCENARIO_STANDARD.md`，其中新增独立 `LC (Lane-Constrained)` 场景类别的定义、schema 字段、descriptor 与 audit 规则
+- 产出固定 split 与 manifest 文档/文件名规范，并在 manifest 中显式标注场景是否属于 `LC`
+- 给出每个 family 的 descriptor 阈值或 admission 条件，并补充 `LC` 的 heading-diff / leader-reverse-turn 相关 admission 条件
+- 给出场景质量评估器定义与打分/过滤逻辑，新增 `lane_fidelity`、`off_lane_shortcut` 与 `leader_reverse_turn_required` 审计结果
+- 明确 P-1.2 Stage-1/Stage-2 如何使用并验证该标准，且报告中需单独给出 `LC` 类别结果
+- 给出 `LC` 数据集覆盖目标：正式 frozen dataset 中该类样本必须形成稳定、可复现的非零占比，并覆盖“航向差小 / 中 / 大”三个层次，且至少包含需要 Leader 倒车转弯微调的代表样本
 
 ### P-1.2 任务阶段（五步走，含 Stage-0 前置）
 **统一对比要求（每个 Stage 必须执行）**
@@ -277,53 +296,130 @@
 
 状态：`In Progress`
 
-更新（2026-03-06）：
-0. `P-1.1B` 与 `P-1.2 Stage-0` 已正式落地到 `DockBench-v1`：
+更新（2026-03-09）：
+0. `P-1.1B` 的 `LC (Lane-Constrained)` 新需求已经正式并入 `DockBench-v1` 的 frozen benchmark：
    - 数据集根目录：`data/dockbench_v1/`
+   - 当前 frozen manifest 为 `90` 个 concrete scenes（`15 tuning / 60 test / 15 challenge`），`CF / SC / FC / EC / LC` 五类 family 各 `18` 个；
    - 生成脚本：`scripts/generate_dockbench_v1.py`
-   - split 冻结：`scripts/freeze_dockbench_v1_splits.py`
-   - Stage-0 审计：`scripts/validate_dockbench_stage0.py`
-   - 当前 Stage-0 审计结果：`data/dockbench_v1/dockbench_v1_stage0_audit.json`，`pass=True`。
+   - split / audit 工具：`scripts/freeze_dockbench_v1_splits.py`、`scripts/validate_dockbench_stage0.py`
+   - 规范书：`DOCK_SCENARIO_STANDARD.md`
 1. `P-1.1` 设计稿已持续同步到当前实现与实验：`DOCK.md`。
-2. Stage-1 已切换到 `DockBench-v1` 的 frozen representative protocol：
-   - `CF_L2 = DBv1-CF-L2-010`
+2. Stage-1 representative 验证已完成：
+   - `CF_L2 = DBv1-CF-L2-008`
    - `SC_L2 = DBv1-SC-L2-026`
-   - `FC_L2 = DBv1-FC-L2-046`
-   - `EC_L2 = DBv1-EC-L2-065`
-   - Stage-1 报告：`artifacts/dockbench_stage1/P_MINUS1_STAGE1_SUITE_REPORT.md`
-   - Stage-1 数据：`artifacts/dockbench_stage1/p_minus1_stage1_suite_results.json`
-3. Stage-2 已切换到 frozen `test` split 的批量协议：
-   - Stage-2 报告：`artifacts/dockbench_stage2_fast/P_MINUS1_STAGE2_REPORT.md`
-   - Stage-2 数据：`artifacts/dockbench_stage2_fast/p_minus1_stage2_results.json`
-   - Stage-2 图表：`artifacts/dockbench_stage2_fast/p_minus1_stage2_success_heatmap.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_subset_compare.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_failure_clusters.png`、`artifacts/dockbench_stage2_fast/p_minus1_stage2_ablation_summary.png`
-4. 当前 `co_bcfd` 的 Stage-2 主指标：
-   - overall `success_rate = 0.9583 (46/48)`；
-   - overall `collision_rate = 0.0208`；
-   - overall `avg_T_done = 20.10s`；
-   - `CF / SC / FC / EC` success 分别为 `1.000 / 1.000 / 0.9167 / 0.9167`。
-5. 当前已满足/已成立的条款：
-   - `P-1.1B` / `Stage-0` 的 family × difficulty × split 冻结与审计闭环；
-   - `Stage-1` 的共同可解代表 + 扩展能力代表验证；
-   - `Stage-2` 的 overall 成功率 `>=95%`；
-   - `Common-Feasible` 子集上强传统基线稳定非零成功；
-   - `Extension-Critical` 子集上 `co_bcfd` 对最优强基线的扩展收益门槛成立。
-6. Stage-2.5 当前完成情况（2026-03-07）：
-   - **已合入主实现**：`CGFL`（Certificate-Gated Fast Lane），对应代码在 `docking/dock_skill.py`；其目标是只在“无遮挡、高净空、无需 leader relocation”的共同可解 easy case 上提速，而不改变 `SC / FC / EC` 的主机制逻辑。
-   - **当前接受的回归结果**：见 `artifacts/stage25_final_co_only/co_only_summary.json`；overall 成功率保持 `0.9583`、碰撞率保持 `0.0208`，overall 平均完成时间从 `20.10s` 降到 `19.72s`，其中 `CF` family 平均完成时间从 `11.88s` 降到 `10.42s`。
-   - **failure-mode 分层统计已补齐**：新增脚本 `scripts/analyze_stage25_failure_modes.py`，当前主线残余失败已被压缩并明确定位为：`DBv1-FC-L3-052 / collision` 与 `DBv1-EC-L1-059 / fov_loss_unrecovered`；对应统计见 `artifacts/stage25_final_co_only/failure_mode_summary.json`。
-   - **M1 安全性主线进展**：已实现并验证一版最小作用域 `FC-L3` 安全闭环原型，在 `DBv1-FC-L3-052` 单案上可把 `collision` 拉回 `success`；但 frozen 全量 `test` split 的 `co-only` 回归仍会引入其它样本回退（见 `artifacts/stage25_m1_co_only/co_only_summary.json`），说明当前 M1 原型仍存在明显 overfit，不予合入主线。
-   - **M2 可见性主线进展**：已实现并验证一版最小作用域 `EC-L1` 可见性回退原型，在 `DBv1-EC-L1-059` 单案上可把 `fov_loss_unrecovered` 拉回 `success`；但一旦放到 frozen 全量 `test` split，仍会连带伤害 `SC/EC` 其它样本，因此同样不予合入主线。
-   - **当前结论**：本轮已完成“failure-mode 分层统计 → 单案复现 → frozen 全量 test 回归”的闭环验证，并证明了两个 hard case 都具有**局部可修复性**；但由于全量回归仍不达标，当前主线继续保持“`CGFL` 已合入、`M1/M2` 原型未合入”的状态。
+   - `FC_L2 = DBv1-FC-L2-044`
+   - `EC_L2 = DBv1-EC-L2-062`
+   - `LC_L2 = DBv1-LC-L2-080`
+   - representative 报告：`artifacts/p_minus1_stage1_lane_refresh/P_MINUS1_STAGE1_SUITE_REPORT.md`
+3. 围绕 `LC` 已完成一轮新的方法级设计：`LC-CRBS (Lane-Constrained Corridor Reciprocal Basin Shaping)`。
+   - 设计书位置：`DOCK.md`
+   - 代码落点：`docking/lc_corridor.py`、`docking/coop_docking.py`、`docking/dock_skill.py`、`docking/planner.py`、`docking/controllers.py`
+   - 单案复现：`artifacts/lc_round3_single/`
+- challenge 说明：当前主指标对应的 `test=60` 已完整回收；challenge 汇总当前来自 `14/15` 场景，缺失样本为 `DBv1-LC-L1-078`。
+4. 基于 `LC-CRBS` 的 frozen `Stage-2`（main gate 仍按 `test` split）已重新汇总：
+   - 报告：`artifacts/dockbench_stage2_lc_crbs_round1_manual/P_MINUS1_STAGE2_REPORT.md`
+   - 数据：`artifacts/dockbench_stage2_lc_crbs_round1_manual/p_minus1_stage2_results.json`
+   - overall：`success_rate = 0.7000 (42/60)`，`collision_rate = 0.0167`，成功样本 `avg_T_done = 16.63s`；
+   - family success：`CF / SC / FC / EC / LC = 1.000 / 0.6667 / 0.9167 / 0.9167 / 0.0000`；
+   - `strong_cf_nonzero = True`，`p13_extension_gain_ge_15pt = True`，但 `co_success_ge_095 / co_collision_zero / co_avg_time_le_15` 仍全部为 `False`。
+5. 与引入 `LC` 后但未修复前的 `Stage-2` 相比：
+   - overall success 未提升（仍为 `0.7000`）；
+   - 但 overall `collision_rate` 已从 `0.1833` 降到 `0.0167`；
+   - `LC` family 已从 `collision` 主导转为 `lc_geometric_deadlock` 主导，说明新方法首先修复了**安全性**，但尚未完成**可完成性翻转**。
+6. 当前已满足/已成立的条款：
+   - `P-1.1B` 的正式规范、schema、family × difficulty × split 冻结已完成；
+   - `Stage-1` 的 frozen representative protocol 已完成并可复现；
+   - `Common-Feasible` 子集上强传统基线稳定非零成功仍成立；
+   - `Extension-Critical` 子集上 `co_bcfd` 对最优强基线的扩展收益门槛仍成立；
+   - 新增 `LC-CRBS` 模块已有清晰消融证据：`A_no_corridor_reciprocity` 不改变 success，但显著恶化 collision。
+7. 当前未完成/需继续迭代的条款：
+   - `Stage-0` 的 full audit 尚未在新 benchmark 上重新闭环；
+   - `Stage-2` 的整体成功率与平均时间门槛仍未满足；
+   - `LC` family 的 success 仍为 `0.0000`，当前的主要失败模式已收敛为 **corridor basin 未形成导致的 deadlock**；
+   - 因此，下一轮的唯一主攻方向应是：把 `LC-CRBS` 从“collision suppression”推进到“corridor-compatible basin completion”。
+   - 本轮还尝试了更激进的 `bidir basin descent` 原型（单案见 `artifacts/lc_round4_single/`），但其在 `LC-L1/L2` 上重新出现 collision，故不保留到主线。
+   - 还尝试了 `closed-loop anchor rollout + basin-ready search` 原型：离线诊断可找到局部可行 anchor，但在真实 Stage-1 接线下未能稳定复现，部分场景直接退回 generic collision，因此也不保留到主线。
+8. `LC` 的最新 round-3 迭代（`HybridMotionPrimitiveLibrary + \sigma_C + semantic reference`）已实现并完成当前子集验证：
+   - 代码：`docking/lc_corridor.py`、`docking/coop_docking.py`、`docking/dock_skill.py`、`docking/p_minus1_baselines.py`；
+   - 单案：`DBv1-LC-L1-074` 仍为 `lc_geometric_deadlock@16.0s`，`DBv1-LC-L2-081` 仍为 `lc_geometric_deadlock@24.0s`，但后者已经进入 `DOCKING:FUNNEL_ALIGN`，且保持 `collision=False`；
+   - LC targeted regression：见 `artifacts/lc_target_regress_round5_ablation/lc_target_regress_ablation_summary.json`，当前 `co_bcfd` 为 `0/12 success, 0/12 collision, 11 deadlock + 1 timeout`；
+   - 对应消融 `A_no_lc_hybrid_search` 同样是 `0/12 success`，但失败结构更差：`2 collision + 6 timeout + 4 deadlock`。
+9. 因此，当前 round-3 的结论是：
+   - 新设计**改善了安全性与 phase completion**，但尚未达到 `LC` 的 basin completion gate；
+   - 在严格 protocol 下，由于 `DBv1-LC-L1-074 / DBv1-LC-L2-081` 的单案 gate 仍未过，本轮**不升级为新的 frozen full Stage-2 主报告**；
+   - 下一轮必须继续专攻 `LC` 的 terminal handoff / final capture closure，而不是再回到纯安全修补。
+10. round-4 诊断已完成，诊断报告见 `artifacts/lc_terminal_capture_round4/LC_TERMINAL_CAPTURE_DIAGNOSIS.md`：
+   - `DBv1-LC-L1-074`：actual leader pose 诱导的 dynamic predock 直接 collision，说明当前 `sigma_C` 对 leader execution closure 过于乐观；
+   - `DBv1-LC-L2-081`：曾进入 `DOCKING:FUNNEL_ALIGN` 的 terminal-shortfall 运行中，actual dynamic predock 同样 collision，因此 follower oscillation 的根因是 release 时 basin 已失效；
+   - `DBv1-LC-L2-081` 的离线 witness 表明：两步 leader micro-reshape 可以把 `sigma_C^{exec}` 恢复到非零可行水平，说明后续正确方向应是 **execution-time basin certificate + leader terminal reshaping**。
+11. 本轮已把上述诊断反映回设计书（`DOCK.md` 的 `5.3C` 与 `10.0B`），并完成了 `sigma_C^{exec}` / leader terminal reshaping 原型接线；当前实现状态见 `artifacts/lc_terminal_capture_round4/ROUND4_IMPLEMENTATION_STATUS.md`。但由于当前代码原型仍未通过关键单案 gate，因此这条线**仍属未完成的 round-4 研究分支**，不能回写为已达成的 Stage-2 结果。
+12. round-5 已在 round-4 诊断基础上进一步落地 execution-time release gate 与 leader reshaping 闭环；当前状态汇总见 `artifacts/lc_terminal_capture_round4/ROUND5_EXECGATE_STATUS.md`。
+   - 当前最好的 retained 单案为 `DBv1-LC-L2-081 @ artifacts/lc_round5_execgate3_L2_081/p_minus1_stage1_results_seed20670585.json`，结果为 `collision=False`、`failure=lc_geometric_deadlock`、`final_pos_error=0.831m`、`final_yaw_error=8.36deg`；
+   - 更激进的 boost 版本虽然更接近 closure，但重新引入了 collision，见 `artifacts/lc_round5_execgate4_L2_081/p_minus1_stage1_results_seed20670585.json`，因此被拒绝；
+   - 由于关键单案 gate 仍未通过，`LC_TARGET_REGRESSION` 仍未升级重跑为新的 retained Stage-2 结果。
+13. round-6 已进一步把 `LEADER_SETTLE` 改写成主动的 certificate-ascent 本地锚点搜索；状态见 `artifacts/lc_terminal_capture_round4/ROUND6_CERT_ASCENT_STATUS.md`。
+   - `DBv1-LC-L1-074`：`artifacts/lc_round6_certascent_L1_074/p_minus1_stage1_results_seed20660454.json`，结果仍为 `collision=False + lc_geometric_deadlock`；
+   - `DBv1-LC-L2-081`：`artifacts/lc_round6_certascent_L2_081/p_minus1_stage1_results_seed20670585.json`，结果仍为 `collision=False + lc_geometric_deadlock`；
+   - 两例在 `LEADER_SETTLE` 阶段都停在 `sigma_C^{exec}=0 / robust=0`，说明当前真正的剩余瓶颈已进一步收敛为：**`LEADER_SHAPE` 结束位姿本身仍落在 local viable basin 之外，导致局部 certificate-ascent search 无可用上升方向。**
+14. 因此，当前主线判断更新为：
+   - `sigma_C^{exec}` 与主动 certificate-ascent settlement 的方向是成立的；
+   - 但仅靠 `LEADER_SETTLE` 的局部搜索仍不足以翻转 `LC`，下一轮若继续，应把 `LEADER_SHAPE` 的终态生成也纳入 execution-valid basin 的目标，而不是只在 settle 末端补局部搜索。
+15. round-7 已按上述判断把 execution-valid basin 目标前置到 `LEADER_SHAPE` 规划层；状态见 `artifacts/lc_terminal_capture_round4/ROUND7_EXEC_SHAPE_STATUS.md`。
+   - `DBv1-LC-L1-074`: `artifacts/lc_round7_execshape_L1_074/p_minus1_stage1_results_seed20660454.json`，当前已进入 docking，但重新出现 `collision_obstacle`；
+   - `DBv1-LC-L2-081`: `artifacts/lc_round7_execshape_L2_081/p_minus1_stage1_results_seed20670585.json`，当前已进入 `DOCKING:FUNNEL_ALIGN / LOCK_ASSIST`，但仍以 `collision_obstacle` 失败；
+   - 因此，前置 execution-valid basin 目标是正确的结构性修改，但当前 anchor 选择仍不够鲁棒，尚未满足“通过关键单案 gate 后再跑 LC 全量”的协议要求。
+16. round-8 已进一步把“Follower 预测点到 contact 区间的扫掠净空”写成终端安全证书，并将其与 execution certificate 联合并入 `LEADER_SHAPE` 的优化目标；状态见 `artifacts/lc_terminal_capture_round4/ROUND8_TERMINAL_TUBE_STATUS.md`。
+   - `DBv1-LC-L1-074`: `artifacts/lc_round8_terminalsafe_L1_074/p_minus1_stage1_results_seed20660454.json`，当前仍为 `collision=False + lc_geometric_deadlock`；当前候选集内尚未找到 terminal-safe anchor。
+   - `DBv1-LC-L2-081`: 在 `artifacts/lc_round8_terminalsafe2_L2_081/p_minus1_stage1_results_seed20670585.json` 中，terminal-safe anchor 已被正确选出，但 leader 运行时未能到达该 anchor；在修正 leader signed path execution 的中间分支 `artifacts/lc_round8_terminalsafe4_L2_081/p_minus1_stage1_results_seed20670585.json` 中，该单案已出现 `success=True + collision=False` 的局部突破。
+   - 因此，本轮新的剩余瓶颈已进一步收敛为：**terminal-safe anchor 的评分已经开始起作用，但双关键单案尚未同时翻转，尤其 `DBv1-LC-L1-074` 仍缺少可执行的 terminal-safe basin。**
+17. round-9 已加入定向 `escape-shape` 搜索与 Any-time 风格的预算框架；状态见 `artifacts/lc_terminal_capture_round4/ROUND9_ESCAPE_BUDGET_STATUS.md`。
+   - `DBv1-LC-L2-081`：当前代码快照上仍保持成功，见 `artifacts/lc_current_check_L2/p_minus1_stage1_results_seed20670585.json`；
+   - `DBv1-LC-L1-074`：当前仍未翻转成功，保留结果仍为 `artifacts/lc_round8_terminalsafe_L1_074/p_minus1_stage1_results_seed20660454.json`；
+   - 规划耗时方面，`L1` 的 targeted escape search 已从约 `5.7s` 降到约 `0.6s`，但仍未满足 `100ms` 硬预算，因此实时性问题只算部分缓解、未完全解决。
+18. round-10 已进一步把 `L1` 的 small-gap escape 分支压缩为单模板、近似评估与硬预算路径；状态见 `artifacts/lc_terminal_capture_round4/ROUND10_ANYTIME_PERF_STATUS.md`。
+   - `DBv1-LC-L1-074`: `artifacts/lc_round9_perfcheck_L1_074/p_minus1_stage1_results_seed20660454.json`，当前仍为 `collision=False + lc_geometric_deadlock`，但 `planner_elapsed_s ≈ 0.0169s`，已满足 `<100ms` 的实时性门槛；
+   - `DBv1-LC-L2-081`: `artifacts/lc_round9_perfcheck_L2_081/p_minus1_stage1_results_seed20670585.json`，当前继续保持 `success=True + collision=False`；
+   - 因此，本轮的阶段性结论是：**实时性问题已经解决到可接受范围，剩余瓶颈纯粹收敛为 `L1` 的覆盖度 / execution-closure 问题。**
+19. round-11 已把 `L1` / `L2` 的 terminal closure 重写为 `\sigma_M`（Terminal-Manifold Closure Certificate）+ `FOLLOWER_TERMINAL_CLOSURE` runtime 近场闭环；状态见 `artifacts/lc_round11_terminal_manifold/ROUND11_TERMINAL_MANIFOLD_STATUS.md`。
+   - `DBv1-LC-L1-074`: `artifacts/lc_round11o_lockhold_L1_074/p_minus1_stage1_results_seed20660454.json`，当前已不再是 `lc_geometric_deadlock`，而是进入 terminal-manifold 后以 `collision_obstacle` 失败；最低净空为 `0.0990m`，说明 remaining gap 已收敛到 generic `LOCK_ASSIST` 的 tight-corridor safety shortfall；
+   - `DBv1-LC-L2-081`: `artifacts/lc_round11o_lockhold_L2_081/p_minus1_stage1_results_seed20670585.json`，当前继续保持 `success=True + collision=False`；
+   - 按严格 protocol，由于 `L1` 单案 gate 仍未通过，本轮**不升级**为新的 `LC_TARGET_REGRESSION` 或 frozen full `Stage-2` retained 结果；round-11 只保留“deadlock 已消除、残差已前移到 final lock-assist safety mismatch”这一负结论。
+20. round-12 已把 `LOCK_ASSIST` 改写为 certificate-consistent `LC_LOCK_HOLD`，并在 runtime evaluator 中加入 terminal-hold invariant projection；状态见 `artifacts/lc_round12_lock_hold/ROUND12_LOCK_HOLD_STATUS.md`。
+   - `DBv1-LC-L1-074`: `artifacts/lc_round12g_gate_L1_074/p_minus1_stage1_results_seed20660454.json`，当前已达到 `success=True + collision=False + min_clearance=0.1031m`；
+   - `DBv1-LC-L2-081`: `artifacts/lc_round12g_gate_L2_081/p_minus1_stage1_results_seed20670585.json`，当前继续保持 `success=True + collision=False + min_clearance=0.1486m`；
+   - `LC` targeted regression：`artifacts/lc_round12_target_regression/LC_TARGET_REGRESSION.json`，当前达到 `success_rate=0.167 (2/12)`，但 `collision_rate=0.083 (1/12)`，残余失败以 `lc_geometric_deadlock` 为主；
+   - 因此，round-12 的 retained 结论是：**关键单案 gate 已通过，L1 的 final lock-assist safety mismatch 已被闭合，但 broader LC family 仍未达到 Stage-2 通过线**；本轮不升级为 frozen full `Stage-2` 主报告。
+21. round-13 已把 `FOLLOWER_READY / Release` 重写为 certificate-consistent handoff gate（短时域 downstream docking safety + witness gain）；状态见 `artifacts/lc_round13_release_gate/ROUND13_RELEASE_GATE_STATUS.md`。
+   - `DBv1-LC-L2-082`: `artifacts/lc_round13d_handoff_L2_082/p_minus1_stage1_results_seed20670716.json`，当前已由 `collision_obstacle` 翻转为 `lc_geometric_deadlock`；
+   - `DBv1-LC-L1-074`: `artifacts/lc_round13c_handoff_L1_074/p_minus1_stage1_results_seed20660454.json`，保持 `success=True + collision=False`；
+   - `DBv1-LC-L2-081`: `artifacts/lc_round13d_handoff_L2_081/p_minus1_stage1_results_seed20670585.json`，保持 `success=True + collision=False`；
+   - 最新 `LC` targeted regression：`artifacts/lc_round13_target_regression/LC_TARGET_REGRESSION.json`，当前达到 `success_rate=0.250 (3/12)`、`collision_rate=0.000 (0/12)`；
+   - 因此，round-13 的 retained 结论是：**LC family 的安全红线已恢复为 0 collision，剩余问题已经纯化为 9 个 `lc_geometric_deadlock` 的 basin coverage**；本轮仍不升级为 frozen full `Stage-2` 主报告。
+
+7. Stage-2.5 历史完成情况（pre-LC 4-family split，仅供参考）：
+7. Stage-2.5 历史完成情况（pre-LC 4-family split，仅供参考）：
+   - **范围说明**：以下 `48/48`、`collision=0` 与 `avg_T_done` 结论均基于引入 `LC` 之前的 `4-family / 48-test` frozen split，当前尚未在 `5-family / 60-test` benchmark 上重跑。
+   - **独立分支已落地**：`TVT / VPCR` 已从“散落在主逻辑里的阈值修补”重构为真正独立的 mode / subskill 分支；代码位于 `docking/stage25_subskills.py`，运行时接线在 `docking/dock_skill.py`，冻结回归脚本为 `scripts/run_stage25_branch_eval.py`。
+   - **当前主线口径**：从设计/论文叙事上，`co_bcfd` 不再被视为“`CGFL + TVT + VPCR + PTCC` 四个补丁模块”的叠加，而被统一表述为：`belief-consistent capture-funnel + 证书场约束策略`。其中 `CGFL + PTCC` 共同收敛到 `进展证书`，`TVT + terminal capture boost + CTP` 共同收敛到 `终端证书`，`VPCR` 收敛到 `可见性证书`；代码实现上仍分别落在 `docking/dock_skill.py`、`docking/stage25_subskills.py`、`docking/time_compression.py`。
+   - **主线 frozen `test` 回归结果**：见 `artifacts/stage25_round10_timecert_test/co_bcfd_summary.json`；overall 成功率保持 `1.0000 (48/48)`，collision rate 维持 `0.0000`，overall 平均完成时间进一步压到 `19.64s`。
+   - **failure-mode 分层统计**：见 `artifacts/stage25_round10_timecert_test/co_bcfd_failure_mode_summary.json`；当前主线在 frozen `test` split 上已无失败样本。
+   - **TVT 主线进展**：`DBv1-FC-L3-052` 单案已被稳定修复；对应对比见 `artifacts/tmp_stage25_singlecases/fc052_compare/p_minus1_stage1_results_seed20480716.json`。在 frozen `test` 上，`FC` family success 已从 `0.9167` 提升到 `1.0000`，且 `collision_rate` 从 `0.0833` 下降到 `0.0000`。
+   - **VPCR 主线进展**：`VPCR` 已进一步演化为 response-reachable pair-capture 设计，并在本轮补上了 `terminal capture boost + certified terminal projection (CTP)`。对应代码在 `docking/stage25_subskills.py` 与 `scripts/run_p_minus1_stage1_docking.py`。在 `DBv1-EC-L1-059` 的 benchmark-aligned 单案中，主线 `co_bcfd` 已被稳定翻转为成功；见 `artifacts/tmp_stage25_singlecases/ec059_promoted_mainline_32/p_minus1_stage1_results_seed20560847.json`。
+   - **本轮 `contact-yaw closure` 结果**：通过 `PAIR → CAPTURE → terminal basin handoff → LOCK_ASSIST + CTP`，`EC-L1-059` 的 terminal pose closure 已在 `32s` budget 下闭合；对应中间诊断链路可见 `artifacts/tmp_stage25_singlecases/ec059_response_contact_vpcr_v2/p_minus1_stage1_results_seed20560847.json`、`artifacts/tmp_stage25_singlecases/ec059_lockassist_morefast_32/p_minus1_stage1_results_seed20560847.json`、`artifacts/tmp_stage25_singlecases/ec059_ctp_speed_32/p_minus1_stage1_results_seed20560847.json`。
+   - **VPCR 全量回归结论**：
+     1. 本轮 frozen `test` 结果见 `artifacts/stage25_round6_mainline_test/co_bcfd_summary.json`，主线 `co_bcfd` 已达到 `1.0000 / 0.0000 / 20.01s`；
+     2. 对应 failure-mode 分层见 `artifacts/stage25_round6_mainline_test/co_bcfd_failure_mode_summary.json`，当前已无失败样本；
+     3. 与旧主线相比，共同成功子集的平均完成时间保持 `19.7553s` 不变，因此新增 `VPCR` 主线并未伤害原有成功样本的时间表现；overall 平均时间上升仅因原先失败的 `EC-L1-059` 以 `31.75s` 被纳入成功统计。
+   - **avg_T_done 冲击尝试结论**：本轮继续专攻“**不伤 `48/48` 的全局时间压缩**”。较激进的 corridor certificate / progress compression 原型在代表场景上可显著降时，例如 `DBv1-SC-L2-025 = 18.55s`、`DBv1-EC-L1-059 = 28.15s`、`DBv1-EC-L2-063 = 31.00s`；对应证据见 `artifacts/tmp_stage25_singlecases/sc025_timeenv/p_minus1_stage1_results_seed20370323.json`、`artifacts/tmp_stage25_singlecases/ec059_timeenv_32/p_minus1_stage1_results_seed20560847.json`、`artifacts/tmp_stage25_singlecases/ec063_timeenv/p_minus1_stage1_results_seed20570585.json`。
+   - 这些激进原型无法同时保住全量 frozen `test` 的 `48/48`：例如 `DBv1-EC-L3-071` 会退化为 `timeout/fov_loss_unrecovered`，见 `artifacts/tmp_stage25_singlecases/ec071_timeenv/p_minus1_stage1_results_seed20580847.json`；对应 frozen `test` 的最好不安全版本可把均时压到 `17.37s`，但会引入新的回退，见 `artifacts/stage25_round3_test/co_bcfd_summary.json` 与 `artifacts/stage25_round3c_test/co_bcfd_summary.json`。
+   - 本轮最终合入主线的是更保守的 `PTCC = SC-blocked-mid + EC-short` 证书，代码位于 `docking/time_compression.py`。其 frozen `test` 结果见 `artifacts/stage25_round10_timecert_test/co_bcfd_summary.json`：在保持 `48/48 + collision=0` 不变的同时，把 overall `avg_T_done` 从 `20.01s` 压到 `19.64s`，其中 `SC` family 均时从 `22.26s` 压到 `22.12s`，`EC` family 均时从 `30.13s` 压到 `29.47s`。
 7. 当前仍未完全收敛的项：
-   - overall `collision_rate` 仍未压到 `0`（残余失败仍包含 `DBv1-FC-L3-052`）；
    - overall `avg_T_done` 仍高于 `15s`，尤其 `SC / EC` family 耗时偏大；
-   - `DBv1-EC-L1-059` 仍未被稳定修复；
-   - `Common-Feasible` 子集上，`co_bcfd` 已通过 `CGFL` 缩小时间差距，但相对最优强传统基线的 `trajectory_cost >= 5%` 优势仍未形成；
-   - Stage-2.5 的 `RCS / SSTF` 还缺一套“不过拟合 tuning、且不会伤害全量 test split”的更稳健实现。
+   - `Common-Feasible` 子集上，`co_bcfd` 已通过 `CGFL` + `TVT/VPCR` 清除了 `FC / EC` 残余失败，但相对最优强传统基线的 `trajectory_cost >= 5%` 优势仍未形成；
 8. 结论：
    - 以“为上层策略层提供可复现、可批量、可 family 分解的双车 docking 基准”为目标，当前 `P-1.1B + P-1.2 Stage-0/1/2` 仍保持可用状态；
-   - 以“Stage-3 前先把 `co_bcfd` 冲到全指标更优”为目标，当前已完成 **第一轮可控增益落地（`CGFL`）**，但 Stage-2.5 尚未达成最终 gate；
-   - 在进入更高置信度的 Stage-3 多车扩展前，仍需继续围绕 `FC-L3` 安全闭环与 `EC-L1` 可见性回退闭环做下一轮迭代。
+   - 以“Stage-3 前先把 `co_bcfd` 冲到全指标更优”为目标，当前已完成 **第四轮可控增益落地（`CGFL` → `gated TVT/VPCR + PTCC`）**，并把 frozen `test` split 的残余 hard case 压到 `0` 个；
+   - 在进入更高置信度的 Stage-3 多车扩展前，当前 Stage-2.5 的主剩余问题已收敛为：如何在不伤 `48/48` 成功率的前提下，继续把 `avg_T_done` 从 `19.64s` 压向 `15s`。
 
 ---
 

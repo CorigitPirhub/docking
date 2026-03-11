@@ -75,6 +75,8 @@ def _case_methods(case_id: str) -> list[str]:
         return [*FULL_METHOD_IDS, "A_no_funnel_gate", "A_no_micro_maneuver"]
     if case_id == "extension":
         return [*FULL_METHOD_IDS, "A_no_stage", "A_no_stage_no_belief"]
+    if case_id == "lane":
+        return [*FULL_METHOD_IDS, "A_no_stage", "A_no_corridor_reciprocity", "A_no_lc_hybrid_search"]
     return list(FULL_METHOD_IDS)
 
 
@@ -85,6 +87,7 @@ def _build_cases(dataset_root_path: Path) -> list[SceneCase]:
         ("switching", reps["SC_L2"]),
         ("funnel", reps["FC_L2"]),
         ("extension", reps["EC_L2"]),
+        ("lane", reps["LC_L2"]),
     ]
     return [
         SceneCase(

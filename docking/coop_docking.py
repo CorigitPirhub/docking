@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -10,6 +11,7 @@ from .config import Config
 from .controllers import PathTrackingController
 from .grid_planner import GridAStarPlanner, GridPlannerConfig
 from .kinematics import VehicleGeometry
+from .lc_corridor import CorridorReciprocityPlanner
 from .math_utils import angle_diff
 from .planner import LocalPlanner
 from .sensors import line_blocked_by_obstacles
@@ -24,6 +26,11 @@ class StagingPlan:
     follower_path_xy: np.ndarray
     score: float
     reason: str
+    control_mode: str = "generic"
+    leader_primitive_states: np.ndarray | None = None
+    leader_primitive_cmd: np.ndarray | None = None
+    leader_primitive_steps: int = 0
+    metadata: dict[str, Any] | None = None
 
 
 def _path_length(path_xy: np.ndarray | None) -> float:
@@ -42,10 +49,35 @@ class CooperativeStagingPlanner:
         self.rng = np.random.default_rng(int(seed))
         self.geom = VehicleGeometry(cfg.vehicle)
         self.collision = CollisionEngine(cfg.vehicle, cfg.safety)
+        self.corridor_planner = CorridorReciprocityPlanner(cfg, seed=int(seed) + 707)
 
-    def _candidate_poses(self, leader: VehicleState, follower: VehicleState) -> list[VehicleState]:
+    def _candidate_poses(self, leader: VehicleState, follower: VehicleState, *, semantic_hints: dict[str, Any] | None = None) -> list[VehicleState]:
         _ = follower
+        hints = dict(semantic_hints or {})
         out: list[VehicleState] = [leader.copy()]
+        anchor_pose = hints.get("leader_stage_anchor_pose")
+        anchor_xy = hints.get("leader_stage_anchor_xy")
+        if isinstance(anchor_pose, dict):
+            out.append(VehicleState(
+                vehicle_id=int(leader.vehicle_id),
+                x=float(anchor_pose.get("x", leader.x)),
+                y=float(anchor_pose.get("y", leader.y)),
+                yaw=float(anchor_pose.get("yaw", leader.yaw)),
+                v=0.0,
+                delta=0.0,
+                mode=leader.mode,
+            ))
+        elif isinstance(anchor_xy, (list, tuple)) and len(anchor_xy) >= 2:
+            yaw_hint = float(hints.get("leader_stage_anchor_yaw", 0.0))
+            out.append(VehicleState(
+                vehicle_id=int(leader.vehicle_id),
+                x=float(anchor_xy[0]),
+                y=float(anchor_xy[1]),
+                yaw=float(yaw_hint),
+                v=0.0,
+                delta=0.0,
+                mode=leader.mode,
+            ))
         yaw0 = float(leader.yaw)
         for _i in range(70):
             r = float(self.rng.uniform(0.0, 6.0))
@@ -157,6 +189,8 @@ class CooperativeStagingPlanner:
         leader: VehicleState,
         follower: VehicleState,
         prefer_static_leader: bool = False,
+        semantic_hints: dict[str, Any] | None = None,
+        use_lc_hybrid_search: bool = True,
     ) -> StagingPlan:
         grid = GridAStarPlanner(
             width=float(self.cfg.environment.width),
@@ -165,12 +199,77 @@ class CooperativeStagingPlanner:
             cfg=GridPlannerConfig(resolution=0.18, inflation_radius=0.55, boundary_block=1, max_expansions=260_000),
         )
 
-        best: StagingPlan | None = None
-        predock_standoff = float(max(0.85, float(self.cfg.docking.stage_switch_distance) - 0.45))
-        clearance_req = float(max(self.cfg.scenario.dock_clearance_min, 0.55))
-        path_clear_req = float(max(float(self.cfg.safety.min_clearance) + 0.22, 0.32))
+        hints = dict(semantic_hints or {})
+        lane_enabled = bool(hints.get("enabled", False) and str(hints.get("category", "")).upper() == "LC")
+        if lane_enabled and not prefer_static_leader:
+            corridor_plan = self.corridor_planner.plan(
+                obstacles=obstacles,
+                leader=leader,
+                follower=follower,
+                lane=hints,
+                use_hybrid_search=bool(use_lc_hybrid_search),
+            )
+            if corridor_plan is not None:
+                return StagingPlan(
+                    leader_goal=corridor_plan.leader_goal.copy(),
+                    follower_goal=corridor_plan.follower_goal.copy(),
+                    leader_path_xy=np.asarray(corridor_plan.leader_path_xy, dtype=float),
+                    follower_path_xy=np.asarray(corridor_plan.follower_path_xy, dtype=float),
+                    score=float(corridor_plan.score),
+                    reason=str(corridor_plan.reason),
+                    control_mode="corridor_reciprocal",
+                    leader_primitive_states=np.asarray(corridor_plan.leader_primitive_states, dtype=float),
+                    leader_primitive_cmd=np.asarray(corridor_plan.leader_primitive_cmd, dtype=float),
+                    leader_primitive_steps=int(corridor_plan.leader_primitive_steps),
+                    metadata=dict(corridor_plan.metadata),
+                )
+        anchor_xy = None
+        if isinstance(hints.get("leader_stage_anchor_xy"), (list, tuple)) and len(hints.get("leader_stage_anchor_xy")) >= 2:
+            anchor_xy = np.asarray(hints.get("leader_stage_anchor_xy"), dtype=float)
+        anchor_yaw = float(hints.get("leader_stage_anchor_yaw", 0.0))
 
-        for cand in self._candidate_poses(leader, follower):
+        best: StagingPlan | None = None
+        predock_standoff = float(max(0.70 if lane_enabled else 0.85, float(self.cfg.docking.stage_switch_distance) - (0.55 if lane_enabled else 0.45)))
+        clearance_req = float(0.22 if lane_enabled else max(self.cfg.scenario.dock_clearance_min, 0.55))
+        path_clear_req = float(max(float(self.cfg.safety.min_clearance) + (0.08 if lane_enabled else 0.22), 0.18 if lane_enabled else 0.32))
+
+        if lane_enabled and anchor_xy is not None and isinstance(hints.get("leader_stage_path_xy"), list) and isinstance(hints.get("follower_stage_path_xy"), list):
+            semantic_cand = VehicleState(
+                vehicle_id=int(leader.vehicle_id),
+                x=float(anchor_xy[0]),
+                y=float(anchor_xy[1]),
+                yaw=float(anchor_yaw),
+                v=0.0,
+                delta=0.0,
+                mode=leader.mode,
+            )
+            if self._in_bounds(semantic_cand, margin=0.7) and not self.collision.in_collision(semantic_cand, obstacles, []) and self.collision.min_clearance_vehicle_obstacles(semantic_cand, obstacles) >= clearance_req:
+                semantic_predock = self._predock_pose(semantic_cand, standoff=predock_standoff)
+                semantic_predock = VehicleState(
+                    vehicle_id=int(follower.vehicle_id),
+                    x=float(semantic_predock.x),
+                    y=float(semantic_predock.y),
+                    yaw=float(semantic_predock.yaw),
+                    v=0.0,
+                    delta=0.0,
+                    mode=follower.mode,
+                )
+                if self._in_bounds(semantic_predock, margin=0.7) and not self.collision.in_collision(semantic_predock, obstacles, [semantic_cand]) and self.collision.min_clearance_vehicle_obstacles(semantic_predock, obstacles) >= clearance_req:
+                    cam = self.geom.front_hitch(semantic_predock)
+                    rear = self.geom.rear_hitch(semantic_cand)
+                    if not line_blocked_by_obstacles(cam, rear, obstacles):
+                        semantic_leader_path = np.asarray(hints.get("leader_stage_path_xy"), dtype=float)
+                        semantic_follower_path = np.asarray(hints.get("follower_stage_path_xy"), dtype=float)
+                        return StagingPlan(
+                            leader_goal=semantic_cand,
+                            follower_goal=semantic_predock,
+                            leader_path_xy=semantic_leader_path.astype(float),
+                            follower_path_xy=semantic_follower_path.astype(float),
+                            score=float(_path_length(semantic_leader_path) + 1.15 * _path_length(semantic_follower_path)),
+                            reason="semantic_anchor",
+                        )
+
+        for cand in self._candidate_poses(leader, follower, semantic_hints=hints):
             if prefer_static_leader and (abs(float(cand.x - leader.x)) + abs(float(cand.y - leader.y)) > 1e-6):
                 continue
             if not self._in_bounds(cand, margin=0.7):
@@ -202,8 +301,16 @@ class CooperativeStagingPlanner:
             if line_blocked_by_obstacles(cam, rear, obstacles):
                 continue
 
-            leader_path = grid.plan(start_xy=_pose_xy(leader), goal_xy=_pose_xy(cand))
-            follower_path = grid.plan(start_xy=_pose_xy(follower), goal_xy=_pose_xy(predock))
+            use_semantic_anchor = bool(
+                lane_enabled
+                and anchor_xy is not None
+                and float(np.linalg.norm(_pose_xy(cand) - anchor_xy)) <= 0.35
+                and abs(angle_diff(float(cand.yaw), float(anchor_yaw))) <= math.radians(20.0)
+                and isinstance(hints.get("leader_stage_path_xy"), list)
+                and len(hints.get("leader_stage_path_xy")) >= 2
+            )
+            leader_path = np.asarray(hints.get("leader_stage_path_xy"), dtype=float) if use_semantic_anchor else grid.plan(start_xy=_pose_xy(leader), goal_xy=_pose_xy(cand))
+            follower_path = np.asarray(hints.get("follower_stage_path_xy"), dtype=float) if use_semantic_anchor and isinstance(hints.get("follower_stage_path_xy"), list) and len(hints.get("follower_stage_path_xy")) >= 2 else grid.plan(start_xy=_pose_xy(follower), goal_xy=_pose_xy(predock))
             if leader_path is None or follower_path is None:
                 continue
 
@@ -232,8 +339,8 @@ class CooperativeStagingPlanner:
                     return np.vstack([path_xy[:-1], pre_xy[None, :], goal_xy[None, :]]).astype(float)
                 return path_xy.astype(float)
 
-            leader_path = attach_approach(np.asarray(leader_path, dtype=float), cand, base_dist=1.1)
-            follower_path = attach_approach(np.asarray(follower_path, dtype=float), predock, base_dist=0.95)
+            leader_path = np.asarray(leader_path, dtype=float) if use_semantic_anchor else attach_approach(np.asarray(leader_path, dtype=float), cand, base_dist=1.1)
+            follower_path = np.asarray(follower_path, dtype=float) if use_semantic_anchor else attach_approach(np.asarray(follower_path, dtype=float), predock, base_dist=0.95)
             leader_len = _path_length(leader_path)
             follower_len = _path_length(follower_path)
             if not (math.isfinite(leader_len) and math.isfinite(follower_len)):
@@ -241,6 +348,8 @@ class CooperativeStagingPlanner:
 
             leader_path_clear = self._path_min_clearance(leader_path, proto=leader, goal_yaw=float(cand.yaw), obstacles=obstacles)
             follower_path_clear = self._path_min_clearance(follower_path, proto=follower, goal_yaw=float(predock.yaw), obstacles=obstacles)
+            if use_semantic_anchor and leader_path_clear < 0.0:
+                leader_path_clear = float(max(path_clear_req, self.collision.min_clearance_vehicle_obstacles(cand, obstacles)))
             corridor_clear = float(min(leader_path_clear, follower_path_clear))
             if corridor_clear < path_clear_req:
                 continue
@@ -251,6 +360,9 @@ class CooperativeStagingPlanner:
             site_clear = self.collision.min_clearance_vehicle_obstacles(cand, obstacles)
             score += 0.6 / max(float(site_clear), 0.2)
             score += 0.85 / max(float(corridor_clear), 0.18)
+            if lane_enabled and anchor_xy is not None:
+                score += 3.2 * float(np.linalg.norm(_pose_xy(cand) - anchor_xy))
+                score += 0.8 * abs(angle_diff(float(cand.yaw), float(anchor_yaw)))
 
             if best is None or float(score) < float(best.score):
                 best = StagingPlan(

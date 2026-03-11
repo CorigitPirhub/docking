@@ -10,20 +10,20 @@ DATASET_ROOT = Path("data/dockbench_v1")
 
 def test_dockbench_manifest_is_balanced() -> None:
     manifest = load_manifest(DATASET_ROOT)
-    assert len(manifest) == 72
+    assert len(manifest) == 90
     split_counts = Counter(spec.split for spec in manifest)
-    assert split_counts == {"tuning": 12, "test": 48, "challenge": 12}
+    assert split_counts == {"tuning": 15, "test": 60, "challenge": 15}
     family_counts = Counter(spec.family for spec in manifest)
     assert family_counts == {family: 18 for family in FAMILIES}
     difficulty_counts = Counter(spec.difficulty for spec in manifest)
-    assert difficulty_counts == {difficulty: 24 for difficulty in DIFFICULTIES}
+    assert difficulty_counts == {difficulty: 30 for difficulty in DIFFICULTIES}
     cell_counts = Counter((spec.family, spec.difficulty) for spec in manifest)
     assert all(count == 6 for count in cell_counts.values())
 
 
 def test_dockbench_representatives_cover_required_stage1_cases() -> None:
     reps = load_representatives(DATASET_ROOT)
-    assert set(reps) == {"CF_L2", "SC_L2", "FC_L2", "EC_L2"}
+    assert set(reps) == {"CF_L2", "SC_L2", "FC_L2", "EC_L2", "LC_L2"}
     for key, spec in reps.items():
         assert spec.split == "test"
         assert spec.difficulty == "L2"
@@ -40,3 +40,17 @@ def test_dockbench_scene_schema_contains_runtime_payload() -> None:
     assert "scenario" in scene
     assert scene["scenario"]["subset_tag"]
     assert all("role" in obstacle for obstacle in scene["obstacles"])
+
+
+def test_lc_scenes_expose_lane_schema_and_audit() -> None:
+    manifest = [spec for spec in load_manifest(DATASET_ROOT) if spec.family == "LC"]
+    assert manifest
+    for spec in manifest[:3]:
+        scene = json.loads(Path(spec.scenario_json).read_text(encoding="utf-8"))
+        assert scene["scenario"]["lane_constrained"] is True
+        assert scene["lane"]["enabled"] is True
+        assert scene["lane"]["category"] == "LC"
+        assert scene["lane"]["corridor_polygons"]
+        assert len(scene["lane"]["width_profile_m"]) == 3
+        assert scene["audit"]["lane_fidelity"] is True
+        assert scene["descriptors"]["off_lane_shortcut_gap_m"] >= 0.75

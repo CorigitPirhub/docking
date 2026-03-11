@@ -10,6 +10,14 @@ from .collision import CollisionEngine
 from .config import Config
 from .coop_docking import CooperativeStagingPlanner, StagingPlan, StagingTracker
 from .kinematics import AckermannModel, VehicleGeometry
+from .lc_corridor import CorridorReciprocityExecutor
+from .stage25_subskills import (
+    TerminalTubePlan,
+    TerminalViabilityTubeSkill,
+    VisibilityPersistentRestagingSkill,
+    VisibilityRestagePlan,
+)
+from .time_compression import PlanCompressionCertificate, PlanCompressionCertifier
 from .math_utils import angle_diff, clamp, wrap_angle
 from .sensors import GlobalPoseSensor, VisionSensor, line_blocked_by_obstacles
 from .types import ControlCommand, Obstacle, VehicleState
@@ -39,17 +47,22 @@ class DockSkillDebug:
     min_clearance: float
     visual_lost_time: float
     replan_count: int = 0
+    terminal_capture_boost: bool = False
 
 
 @dataclass(frozen=True)
 class DockSkillOptions:
     enable_cooperative_staging: bool = True
+    enable_corridor_reciprocity: bool = True
+    enable_lc_hybrid_search: bool = True
     fusion_mode: str = "belief_consistent"  # belief_consistent | dist_blend | hard_switch | global_only
     enable_capture_funnel: bool = True
     enable_micro_replan: bool = True
     enable_fallback: bool = True
     enable_safety_projection: bool = True
     enable_fast_lane: bool = True
+    enable_terminal_viability_tube: bool = True
+    enable_visibility_persistent_restaging: bool = True
 
 
 class CooperativeDockingSkill:
@@ -71,6 +84,7 @@ class CooperativeDockingSkill:
         follower_init: VehicleState,
         prefer_static_leader: bool = False,
         plan: StagingPlan | None = None,
+        lane_hints: dict[str, Any] | None = None,
         options: DockSkillOptions | None = None,
     ) -> None:
         self.cfg = cfg
@@ -84,8 +98,13 @@ class CooperativeDockingSkill:
 
         self._staging_planner = CooperativeStagingPlanner(cfg, seed=self.seed + 31)
         self._tracker = StagingTracker(cfg)
+        self._corridor_executor = CorridorReciprocityExecutor(cfg)
+        self._time_certifier = PlanCompressionCertifier(cfg)
+        self._tvt_skill = TerminalViabilityTubeSkill(cfg)
+        self._vpcr_skill = VisibilityPersistentRestagingSkill(cfg)
 
         self._prefer_static_leader = bool(prefer_static_leader or (not self.options.enable_cooperative_staging))
+        self._lane_hints = dict(lane_hints or {})
         if plan is not None:
             plan = self._canonicalize_plan(plan, leader_ref=leader_init, follower_ref=follower_init)
         self._plan: StagingPlan | None = None if plan is None else plan
@@ -95,6 +114,27 @@ class CooperativeDockingSkill:
         self._leader_path_xy: np.ndarray | None = None
         self._follower_path_xy: np.ndarray | None = None
         self._leader_relocated = False
+        self._active_branch: str | None = None
+        self._tvt_plan: TerminalTubePlan | None = None
+        self._vpcr_plan: VisibilityRestagePlan | None = None
+        self._tvt_used = False
+        self._vpcr_used = 0
+        self._vpcr_loss_attempted = False
+        self._had_near_field_visual = False
+        self._plan_time_cert: PlanCompressionCertificate | None = None
+        self._semantic_lane_plan = False
+        self._terminal_capture_boost = False
+        self._lane_heading_target: float | None = None
+        self._leader_post_align_active = False
+        self._leader_post_align_attempts = 0
+        self._leader_post_align_time = 0.0
+        self._leader_post_align_total_time = 0.0
+        self._leader_post_align_best_error = float("inf")
+        self._leader_post_align_entry_error = float("inf")
+        self._leader_post_align_prev_error = float("inf")
+        self._leader_post_align_diverge_count = 0
+        self._leader_post_align_failed = False
+        self._leader_post_align_failure_reason = ""
 
         # Follower sensors observing the leader target.
         self._global_sensor = GlobalPoseSensor(cfg.sensors.global_sensor, seed=self.seed + 11)
@@ -110,7 +150,6 @@ class CooperativeDockingSkill:
         self._dock_best_tail = float("inf")
         self._dock_stall_time = 0.0
         self._replan_count = 0
-        self._fast_lane_certified = False
         self._fast_lane_certified = False
 
         self._bcfd_cfg = BCFDConfig()
@@ -129,6 +168,27 @@ class CooperativeDockingSkill:
         self._leader_path_xy = None
         self._follower_path_xy = None
         self._leader_relocated = False
+        self._active_branch = None
+        self._tvt_plan = None
+        self._vpcr_plan = None
+        self._tvt_used = False
+        self._vpcr_used = 0
+        self._vpcr_loss_attempted = False
+        self._had_near_field_visual = False
+        self._plan_time_cert: PlanCompressionCertificate | None = None
+        self._terminal_capture_boost = False
+        self._lane_heading_target = None
+        self._leader_post_align_active = False
+        self._leader_post_align_attempts = 0
+        self._leader_post_align_time = 0.0
+        self._leader_post_align_total_time = 0.0
+        self._leader_post_align_best_error = float("inf")
+        self._leader_post_align_entry_error = float("inf")
+        self._leader_post_align_prev_error = float("inf")
+        self._leader_post_align_diverge_count = 0
+        self._leader_post_align_failed = False
+        self._leader_post_align_failure_reason = ""
+        self._vpcr_skill.reset()
 
         self._last_global = None
         self._last_vision = None
@@ -140,6 +200,7 @@ class CooperativeDockingSkill:
         self._dock_best_tail = float("inf")
         self._dock_stall_time = 0.0
         self._replan_count = 0
+        self._corridor_executor.reset()
 
         if self._fixed_plan is not None:
             self._apply_plan(self._fixed_plan)
@@ -151,7 +212,7 @@ class CooperativeDockingSkill:
         leader_ref: VehicleState,
         follower_ref: VehicleState,
     ) -> StagingPlan:
-        if self._prefer_static_leader:
+        if self._prefer_static_leader or str(plan.control_mode) == "corridor_reciprocal":
             return plan
         move_dist = float(np.linalg.norm(plan.leader_goal.xy() - leader_ref.xy()))
         if move_dist >= 0.35:
@@ -199,17 +260,168 @@ class CooperativeDockingSkill:
             return False
         return self._dock_zone_clearance(self._leader_goal) >= 1.35
 
-    def _apply_plan(self, plan: StagingPlan, *, leader_ref: VehicleState | None = None) -> None:
+    def _lc_terminal_lock_command(self, *, follower: VehicleState, leader: VehicleState) -> ControlCommand:
+        if float(follower.v) > float(leader.v) + 0.01:
+            accel = float(-float(self.cfg.vehicle.max_decel))
+        else:
+            accel = float(
+                clamp(
+                    float(self.cfg.control.speed.kp) * (float(leader.v) - float(follower.v)),
+                    -float(self.cfg.vehicle.max_decel),
+                    float(self.cfg.control.speed.max_accel_cmd),
+                )
+            )
+        steer_rate = float(-float(follower.delta) / max(float(self.cfg.control.dt), 1e-3))
+        command = ControlCommand(accel=accel, steer_rate=steer_rate)
+        projected = self.model.step(follower, command, float(self.cfg.control.dt))
+        clearance_m = float(self.collision.min_clearance_vehicle_obstacles(projected, self.obstacles))
+        if clearance_m < float(self.cfg.safety.min_clearance) + 0.008:
+            return ControlCommand(
+                accel=float(-math.copysign(float(self.cfg.vehicle.max_decel), float(follower.v))) if abs(float(follower.v)) > 1e-3 else 0.0,
+                steer_rate=steer_rate,
+            )
+        return command
+
+    def _freeze_vehicle(self, state: VehicleState) -> ControlCommand:
+        if abs(float(state.v)) > 0.02:
+            return ControlCommand(
+                accel=float(-math.copysign(float(self.cfg.vehicle.max_decel), float(state.v))),
+                steer_rate=0.0,
+            )
+        return ControlCommand(
+            accel=0.0,
+            steer_rate=float(-float(state.delta) / max(float(self.cfg.control.dt), 1e-3)),
+        )
+
+    def _resolve_lane_heading_target(self, *, plan: StagingPlan | None) -> float | None:
+        if plan is not None and isinstance(plan.metadata, dict) and "lane_heading" in plan.metadata:
+            return float(plan.metadata["lane_heading"])
+        centerline = self._lane_hints.get("centerline", [])
+        if isinstance(centerline, list) and len(centerline) >= 2:
+            start_xy = np.asarray(centerline[0], dtype=float)
+            end_xy = np.asarray(centerline[-1], dtype=float)
+            segment_xy = end_xy - start_xy
+            if float(np.linalg.norm(segment_xy)) > 1e-9:
+                return float(math.atan2(float(segment_xy[1]), float(segment_xy[0])))
+        return None
+
+    def _corridor_parallel_yaw_error(self, *, yaw: float) -> float:
+        if self._lane_heading_target is None:
+            return 0.0
+        lane_heading = float(self._lane_heading_target)
+        return float(
+            min(
+                abs(float(angle_diff(float(yaw), lane_heading))),
+                abs(float(angle_diff(float(yaw), float(wrap_angle(lane_heading + math.pi))))),
+            )
+        )
+
+    def _corridor_parallel_signed_error(self, *, yaw: float) -> float:
+        if self._lane_heading_target is None:
+            return 0.0
+        lane_heading = float(self._lane_heading_target)
+        candidate_a = float(angle_diff(lane_heading, float(yaw)))
+        candidate_b = float(angle_diff(float(wrap_angle(lane_heading + math.pi)), float(yaw)))
+        return float(candidate_a if abs(candidate_a) <= abs(candidate_b) else candidate_b)
+
+    def _project_locked_follower_state(self, *, follower: VehicleState, leader: VehicleState) -> VehicleState | None:
+        anchor_xy = self.geom.rear_hitch(leader)
+        heading_xy = np.array([math.cos(float(leader.yaw)), math.sin(float(leader.yaw))], dtype=float)
+        center_xy = anchor_xy - heading_xy * float(self.geom.front_hitch_x)
+        projected = VehicleState(
+            vehicle_id=int(follower.vehicle_id),
+            x=float(center_xy[0]),
+            y=float(center_xy[1]),
+            yaw=float(leader.yaw),
+            v=float(leader.v),
+            delta=float(leader.delta),
+            mode=follower.mode,
+        )
+        clearance_floor = float(self.cfg.safety.min_clearance) + 0.005
+        if float(self.collision.min_clearance_vehicle_obstacles(projected, self.obstacles)) < clearance_floor:
+            return None
+        if float(self.collision.min_clearance_vehicle_obstacles(leader, self.obstacles)) < clearance_floor:
+            return None
+        return projected
+
+    def _leader_post_align_command(
+        self,
+        *,
+        leader: VehicleState,
+        follower: VehicleState,
+    ) -> tuple[ControlCommand, float, bool, bool]:
+        current_error = float(self._corridor_parallel_yaw_error(yaw=float(leader.yaw)))
+        if self._lane_heading_target is None or current_error <= math.radians(15.0):
+            return self._freeze_vehicle(leader), float(current_error), True, False
+        steer_soft = math.radians(18.0)
+        steer_mid = math.radians(24.0)
+        signed_gap = float(self._corridor_parallel_signed_error(yaw=float(leader.yaw)))
+        target_sign = 1.0 if signed_gap >= 0.0 else -1.0
+        dt = float(self.cfg.control.dt)
+        max_rate = math.radians(float(self.cfg.vehicle.max_steer_rate_deg_s))
+        phase_duration_s = 0.35
+        forward_phase = bool(int(self._leader_post_align_time / max(phase_duration_s, dt)) % 2 == 0)
+        steer_target = float(target_sign * (steer_mid if abs(signed_gap) > math.radians(18.0) else steer_soft))
+        target_speed = float(0.10 if forward_phase else -0.08)
+        target_delta = float(steer_target if forward_phase else -steer_target)
+        leader_roll = leader.copy()
+        follower_roll = follower.copy()
+        min_clearance_m = float("inf")
+        blocked = False
+        for _ in range(8):
+            accel = float(
+                clamp(
+                    float(self.cfg.control.speed.kp) * (float(target_speed) - float(leader_roll.v)),
+                    -float(self.cfg.vehicle.max_decel),
+                    float(self.cfg.control.speed.max_accel_cmd),
+                )
+            )
+            steer_rate = float(clamp((float(target_delta) - float(leader_roll.delta)) / max(dt, 1e-3), -max_rate, max_rate))
+            cmd = ControlCommand(accel=accel, steer_rate=steer_rate)
+            leader_next = self.model.step(leader_roll, cmd, dt)
+            follower_next = self._project_locked_follower_state(follower=follower_roll, leader=leader_next)
+            if follower_next is None:
+                blocked = True
+                break
+            min_clearance_m = float(
+                min(
+                    min_clearance_m,
+                    self.collision.min_clearance_vehicle_obstacles(leader_next, self.obstacles),
+                    self.collision.min_clearance_vehicle_obstacles(follower_next, self.obstacles),
+                )
+            )
+            leader_roll = leader_next
+            follower_roll = follower_next
+        if blocked:
+            return self._freeze_vehicle(leader), float(current_error), False, True
+        yaw_error = float(self._corridor_parallel_yaw_error(yaw=float(leader_roll.yaw)))
+        align_done = bool(yaw_error <= math.radians(15.0))
+        command = ControlCommand(
+            accel=float(
+                clamp(
+                    float(self.cfg.control.speed.kp) * (float(target_speed) - float(leader.v)),
+                    -float(self.cfg.vehicle.max_decel),
+                    float(self.cfg.control.speed.max_accel_cmd),
+                )
+            ),
+            steer_rate=float(clamp((float(target_delta) - float(leader.delta)) / max(dt, 1e-3), -max_rate, max_rate)),
+        )
+        return command, float(yaw_error), align_done, False
+
+    def _apply_plan(self, plan: StagingPlan, *, leader_ref: VehicleState | None = None, follower_ref: VehicleState | None = None) -> None:
         self._plan = plan
+        self._corridor_executor.reset()
+        self._semantic_lane_plan = str(plan.control_mode) == "corridor_reciprocal" or str(plan.reason) in {"semantic_anchor", "lc_corridor_reciprocity"}
         self._leader_goal = plan.leader_goal.copy()
         self._follower_goal = plan.follower_goal.copy()
         self._leader_path_xy = plan.leader_path_xy.astype(float).copy()
         self._follower_path_xy = plan.follower_path_xy.astype(float).copy()
 
         ref = self._leader_init if leader_ref is None else leader_ref
+        follower_ref_eff = self._follower_init if follower_ref is None else follower_ref
         move_dist = float(np.linalg.norm(self._leader_goal.xy() - ref.xy()))
         self._leader_relocated = (not self._prefer_static_leader) and (move_dist >= 0.35)
-        self._fast_lane_certified = self._compute_fast_lane_certificate(leader_ref=ref, follower_ref=self._follower_init)
+        self._fast_lane_certified = self._compute_fast_lane_certificate(leader_ref=ref, follower_ref=follower_ref_eff)
 
         self._stage = "STAGING" if self._leader_relocated else "DOCKING"
         self._follower_substage = "APPROACH_PATH"
@@ -217,20 +429,137 @@ class CooperativeDockingSkill:
         self._staging_time = 0.0
         self._dock_best_tail = float("inf")
         self._dock_stall_time = 0.0
+        self._lane_heading_target = self._resolve_lane_heading_target(plan=plan)
+        self._leader_post_align_active = False
+        self._leader_post_align_attempts = 0
+        self._leader_post_align_time = 0.0
+        self._leader_post_align_total_time = 0.0
+        self._leader_post_align_best_error = float("inf")
+        self._leader_post_align_entry_error = float("inf")
+        self._leader_post_align_prev_error = float("inf")
+        self._leader_post_align_diverge_count = 0
+        self._leader_post_align_failed = False
+        self._leader_post_align_failure_reason = ""
+        self._plan_time_cert = self._time_certifier.certify(
+            leader_ref=ref,
+            follower_ref=follower_ref_eff,
+            leader_goal=self._leader_goal,
+            follower_goal=self._follower_goal,
+            leader_path_xy=self._leader_path_xy,
+            follower_path_xy=self._follower_path_xy,
+            obstacles=self.obstacles,
+        )
+
+    def _stage_plan_from_branch(self, plan: TerminalTubePlan | VisibilityRestagePlan) -> StagingPlan:
+        return StagingPlan(
+            leader_goal=plan.leader_goal.copy(),
+            follower_goal=plan.follower_goal.copy(),
+            leader_path_xy=plan.leader_path_xy.astype(float).copy(),
+            follower_path_xy=plan.follower_path_xy.astype(float).copy(),
+            score=float(plan.score),
+            reason=str(plan.reason),
+        )
+
+    def _activate_branch_plan(
+        self,
+        *,
+        branch: str,
+        leader_ref: VehicleState,
+        follower_ref: VehicleState,
+        plan: TerminalTubePlan | VisibilityRestagePlan,
+    ) -> None:
+        self._apply_plan(self._stage_plan_from_branch(plan), leader_ref=leader_ref, follower_ref=follower_ref)
+        self._active_branch = str(branch)
+        self._stage = "STAGING"
+        self._near_field_active = False
+        self._staging_time = 0.0
+        self._dock_best_tail = float("inf")
+        self._dock_stall_time = 0.0
+        self._follower_substage = "TUBE_TRACK" if branch == "TVT" else "RESTAGE_PATH"
+        if branch == "VPCR":
+            self._vpcr_skill.reset()
+
+    def _maybe_activate_tvt(self, *, leader: VehicleState, follower: VehicleState, d_tail: float) -> None:
+        if self._active_branch is not None or self._tvt_used:
+            return
+        if not self.options.enable_terminal_viability_tube:
+            return
+        if self._stage != "STAGING":
+            return
+        if line_blocked_by_obstacles(self.geom.front_hitch(follower), self.geom.rear_hitch(leader), self.obstacles):
+            return
+        if abs(float(angle_diff(float(leader.yaw), float(follower.yaw)))) > math.radians(25.0):
+            return
+        if self._leader_goal is None or self._follower_goal is None or self._leader_path_xy is None or self._follower_path_xy is None:
+            return
+        plan = self._tvt_skill.propose(
+            obstacles=self.obstacles,
+            leader=leader,
+            follower=follower,
+            nominal_leader_goal=self._leader_goal,
+            nominal_follower_goal=self._follower_goal,
+            nominal_leader_path_xy=self._leader_path_xy,
+            nominal_follower_path_xy=self._follower_path_xy,
+            dock_zone_clearance_m=float(self._dock_zone_clearance(self._leader_goal)),
+        )
+        if plan is None:
+            return
+        self._tvt_plan = plan
+        self._activate_branch_plan(branch="TVT", leader_ref=leader, follower_ref=follower, plan=plan)
+        self._tvt_used = True
+        self._replan_count += 1
+
+    def _maybe_activate_vpcr(self, *, leader: VehicleState, follower: VehicleState, d_tail: float, visual_valid: bool) -> None:
+        if self._active_branch is not None or self._vpcr_used >= 2 or self._vpcr_loss_attempted:
+            return
+        if not self.options.enable_visibility_persistent_restaging:
+            return
+        if self._stage != "DOCKING":
+            return
+        if not self.options.enable_fallback:
+            return
+        if not self._had_near_field_visual:
+            return
+        if bool(visual_valid):
+            return
+        vpcr_loss_tau = float(max(0.35, 0.45 * float(self.cfg.docking.recovery_visual_loss_timeout_s)))
+        if self._visual_lost_time < vpcr_loss_tau:
+            return
+        if d_tail > float(self.cfg.docking.stage_switch_distance) + 0.75:
+            return
+        self._vpcr_loss_attempted = True
+        plan = self._vpcr_skill.propose(
+            obstacles=self.obstacles,
+            leader=leader,
+            follower=follower,
+        )
+        if plan is None:
+            return
+        self._vpcr_plan = plan
+        self._activate_branch_plan(branch="VPCR", leader_ref=leader, follower_ref=follower, plan=plan)
+        self._vpcr_used += 1
+        self._replan_count += 1
 
     def _maybe_plan(self) -> None:
         if self._plan is not None:
             return
+        lane_hints = self._lane_hints if self.options.enable_corridor_reciprocity else {}
         plan = self._staging_planner.plan(
             obstacles=self.obstacles,
             leader=self._leader_init,
             follower=self._follower_init,
             prefer_static_leader=self._prefer_static_leader,
+            semantic_hints=lane_hints,
+            use_lc_hybrid_search=bool(self.options.enable_lc_hybrid_search),
         )
         plan = self._canonicalize_plan(plan, leader_ref=self._leader_init, follower_ref=self._follower_init)
         self._apply_plan(plan)
 
     def _maybe_replan_from_current(self, *, leader: VehicleState, follower: VehicleState, d_tail: float) -> None:
+        if self._active_branch is not None:
+            self._dock_best_tail = float("inf")
+            self._dock_stall_time = 0.0
+            return
         if not self.options.enable_micro_replan:
             self._dock_best_tail = float("inf")
             self._dock_stall_time = 0.0
@@ -251,14 +580,17 @@ class CooperativeDockingSkill:
         if float(d_tail) <= max(0.45, 3.0 * float(self.cfg.docking.lock_position_tol)):
             return
         try:
+            lane_hints = self._lane_hints if self.options.enable_corridor_reciprocity else {}
             plan = self._staging_planner.plan(
                 obstacles=self.obstacles,
                 leader=leader.copy(),
                 follower=follower.copy(),
                 prefer_static_leader=False,
+                semantic_hints=lane_hints,
+                use_lc_hybrid_search=bool(self.options.enable_lc_hybrid_search),
             )
             plan = self._canonicalize_plan(plan, leader_ref=leader, follower_ref=follower)
-            self._apply_plan(plan, leader_ref=leader)
+            self._apply_plan(plan, leader_ref=leader, follower_ref=follower)
             self._replan_count += 1
             self._follower_substage = "REPLAN_STAGING"
         except Exception:
@@ -397,23 +729,25 @@ class CooperativeDockingSkill:
         dist = float(np.linalg.norm(rel_world))
 
         fast_lane = bool(self._fast_lane_certified)
+        terminal_boost = bool(self._terminal_capture_boost and dist <= 1.50 and yaw_err <= math.radians(12.0) and abs(y_l) <= 0.26)
         if dist > float(cfg.align_enter_dist_m):
             x_ref = float(clamp(0.70 + 0.18 * dist, float(cfg.standoff_approach_min), float(cfg.standoff_approach_max)))
-            v_cap = float(1.30 if fast_lane else cfg.v_cap_approach)
+            v_cap = float(1.30 if fast_lane else (1.18 if terminal_boost else cfg.v_cap_approach))
         elif dist > float(cfg.dock_enter_dist_m):
             x_ref = float(cfg.standoff_align)
-            v_cap = float(0.42 if fast_lane else cfg.v_cap_align)
+            v_cap = float(0.42 if fast_lane else (0.46 if terminal_boost else cfg.v_cap_align))
         else:
             x_ref = 0.0
-            v_cap = float(0.18 if fast_lane else cfg.v_cap_dock)
+            v_cap = float(0.18 if fast_lane else (0.24 if terminal_boost else cfg.v_cap_dock))
 
         ex = float(x_l - x_ref)
         v_ref = float(leader.v) + float(cfg.k_x) * float(ex)
         v_ref = float(clamp(v_ref, -float(self.cfg.vehicle.max_reverse_speed), float(v_cap)))
 
         # Contact gate: if too close but misaligned, back off to create room.
-        gate_lat = float(cfg.gate_lat_m * (1.8 if fast_lane else 1.0))
-        gate_yaw = math.radians(float(cfg.gate_yaw_deg * (1.8 if fast_lane else 1.0)))
+        gate_scale = 1.8 if fast_lane else (1.35 if terminal_boost else 1.0)
+        gate_lat = float(cfg.gate_lat_m * gate_scale)
+        gate_yaw = math.radians(float(cfg.gate_yaw_deg * gate_scale))
         if dist <= float(cfg.gate_contact_dist_m):
             if abs(y_l) > gate_lat or yaw_err > gate_yaw:
                 v_ref = float(-0.08 if fast_lane else cfg.gate_backoff_speed)
@@ -499,7 +833,6 @@ class CooperativeDockingSkill:
         assert self._leader_path_xy is not None and self._follower_path_xy is not None
 
         d_tail = float(np.linalg.norm(self.geom.front_hitch(follower) - self.geom.rear_hitch(leader)))
-        self._maybe_replan_from_current(leader=leader, follower=follower, d_tail=float(d_tail))
         if self._stage == "STAGING":
             self._near_field_active = False
         allow_contact_dist = float(max(0.45, float(self.cfg.docking.soft_capture_distance) + 0.05))
@@ -517,53 +850,198 @@ class CooperativeDockingSkill:
             gamma = 0.0
             nis = float("inf")
             visual_valid = False
+        if visual_valid and d_tail <= float(self.cfg.docking.stage_switch_distance) + 0.45:
+            self._had_near_field_visual = True
+            self._vpcr_loss_attempted = False
+
+        self._maybe_activate_tvt(leader=leader, follower=follower, d_tail=float(d_tail))
+        self._maybe_activate_vpcr(leader=leader, follower=follower, d_tail=float(d_tail), visual_valid=bool(visual_valid))
+        if self._active_branch is None:
+            self._maybe_replan_from_current(leader=leader, follower=follower, d_tail=float(d_tail))
 
         # Default commands.
         leader_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
         follower_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
         fallback_global = False
         fallback_reason = ""
+        debug_stage = str(self._active_branch) if self._active_branch is not None else str(self._stage)
+        debug_substage = str(self._follower_substage)
 
-        # Leader staging.
-        if self._stage == "STAGING":
+        if self._active_branch == "TVT" and self._tvt_plan is not None:
+            leader_cmd, follower_cmd, branch_done, branch_substage = self._tvt_skill.command(
+                leader=leader,
+                follower=follower,
+                plan=self._tvt_plan,
+                obstacles=self.obstacles,
+            )
+            debug_stage = "TVT"
+            debug_substage = str(branch_substage)
+            self._follower_substage = str(branch_substage)
+            if branch_done:
+                self._active_branch = None
+                self._tvt_plan = None
+                self._stage = "DOCKING"
+                self._near_field_active = False
+                self._dock_best_tail = float("inf")
+                self._dock_stall_time = 0.0
+                self._follower_substage = "APPROACH_PATH"
+        elif self._active_branch == "VPCR" and self._vpcr_plan is not None:
+            leader_cmd, follower_cmd, branch_done, branch_substage = self._vpcr_skill.command(
+                leader=leader,
+                follower=follower,
+                plan=self._vpcr_plan,
+                obstacles=self.obstacles,
+                visual_valid=bool(visual_valid),
+            )
+            debug_stage = "VPCR"
+            debug_substage = str(branch_substage)
+            self._follower_substage = str(branch_substage)
+            if branch_done:
+                self._active_branch = None
+                self._vpcr_plan = None
+                self._stage = "DOCKING"
+                self._near_field_active = True
+                self._terminal_capture_boost = True
+                self._dock_best_tail = float("inf")
+                self._dock_stall_time = 0.0
+                self._follower_substage = "VPCR_HANDOFF"
+                debug_substage = "VPCR_HANDOFF"
+        elif self._stage == "STAGING":
             self._staging_time += float(self.cfg.control.dt)
-            leader_rem = self._path_remaining_distance(leader, self._leader_path_xy)
-            follower_rem = self._path_remaining_distance(follower, self._follower_path_xy)
-            sync_ratio = leader_rem / max(follower_rem, 1e-3)
-            leader_speed = float(clamp(0.45 + 0.18 * sync_ratio, 0.32, 0.72))
-            follower_speed = float(clamp(0.55 + 0.55 * sync_ratio, 0.38, 1.12))
-            leader_cmd, leader_done = self._tracker.command(
-                state=leader,
-                goal=self._leader_goal,
-                path_xy=self._leader_path_xy,
-                target_speed=leader_speed,
-                obstacles=self.obstacles,
-                other=follower,
-            )
-            follower_cmd, _ = self._tracker.command(
-                state=follower,
-                goal=self._follower_goal,
-                path_xy=self._follower_path_xy,
-                target_speed=follower_speed,
-                obstacles=self.obstacles,
-                other=leader,
-            )
-            self._follower_substage = "APPROACH_PATH"
-            follower_goal_dist = float(np.linalg.norm(follower.xy() - self._follower_goal.xy()))
-            follower_ready = bool(
-                follower_goal_dist <= 0.70
-                or d_tail <= float(self.cfg.docking.stage_switch_distance) + 0.25
-            )
-            forced_limit = 18.0 if self._leader_relocated else 14.0
-            forced_done = bool(self._staging_time >= forced_limit and follower_ready)
-            if leader_done and follower_ready:
-                self._stage = "DOCKING"
-            elif forced_done:
-                self._stage = "DOCKING"
-                self._follower_substage = "FORCED_DOCK"
+            if self._plan is not None and str(self._plan.control_mode) == "corridor_reciprocal":
+                leader_cmd, follower_cmd, stage_done, lc_substage = self._corridor_executor.command(
+                    leader=leader,
+                    follower=follower,
+                    plan=self._plan,
+                    obstacles=self.obstacles,
+                )
+                self._follower_substage = str(lc_substage)
+                debug_stage = "STAGING_LC"
+                debug_substage = str(lc_substage)
+                if stage_done:
+                    self._stage = "DOCKING"
+            else:
+                leader_rem = self._path_remaining_distance(leader, self._leader_path_xy)
+                follower_rem = self._path_remaining_distance(follower, self._follower_path_xy)
+                sync_ratio = leader_rem / max(follower_rem, 1e-3)
+                time_cert = self._plan_time_cert
+                progress_compress = bool(
+                    time_cert is not None
+                    and bool(time_cert.active)
+                    and self._active_branch is None
+                    and (not self._vpcr_loss_attempted)
+                )
+                if self._semantic_lane_plan:
+                    leader_speed = 0.16
+                    follower_speed = 0.24
+                elif progress_compress:
+                    leader_speed = float(clamp((0.45 + 0.18 * sync_ratio) * float(time_cert.stage_leader_scale), 0.32, 1.10))
+                    follower_speed = float(clamp((0.55 + 0.55 * sync_ratio) * float(time_cert.stage_follower_scale), 0.38, 1.55))
+                else:
+                    leader_speed = float(clamp(0.45 + 0.18 * sync_ratio, 0.32, 0.72))
+                    follower_speed = float(clamp(0.55 + 0.55 * sync_ratio, 0.38, 1.12))
+                leader_cmd, leader_done = self._tracker.command(
+                    state=leader,
+                    goal=self._leader_goal,
+                    path_xy=self._leader_path_xy,
+                    target_speed=leader_speed,
+                    obstacles=self.obstacles,
+                    other=follower,
+                )
+                follower_cmd, _ = self._tracker.command(
+                    state=follower,
+                    goal=self._follower_goal,
+                    path_xy=self._follower_path_xy,
+                    target_speed=follower_speed,
+                    obstacles=self.obstacles,
+                    other=leader,
+                )
+                self._follower_substage = "APPROACH_PATH"
+                debug_stage = "STAGING"
+                debug_substage = "APPROACH_PATH"
+                follower_goal_dist = float(np.linalg.norm(follower.xy() - self._follower_goal.xy()))
+                follower_ready = bool(
+                    follower_goal_dist <= 0.70
+                    or d_tail <= float(self.cfg.docking.stage_switch_distance) + 0.25
+                )
+                forced_limit = 18.0 if self._leader_relocated else 14.0
+                forced_done = bool(self._staging_time >= forced_limit and follower_ready)
+                if leader_done and follower_ready:
+                    self._stage = "DOCKING"
+                elif forced_done:
+                    self._stage = "DOCKING"
+                    self._follower_substage = "FORCED_DOCK"
+                debug_substage = "FORCED_DOCK"
         else:
+            corridor_yaw_error = float(self._corridor_parallel_yaw_error(yaw=float(leader.yaw)))
+            post_align_needed = bool(
+                self._semantic_lane_plan
+                and self._lane_heading_target is not None
+                and d_tail <= 1.25
+                and corridor_yaw_error > math.radians(12.0)
+            )
+            if post_align_needed and self._leader_post_align_total_time >= 5.0:
+                self._leader_post_align_failed = True
+            if (
+                (not self._leader_post_align_active)
+                and post_align_needed
+                and (not self._leader_post_align_failed)
+                and self._leader_post_align_attempts < 6
+            ):
+                self._leader_post_align_active = True
+                self._leader_post_align_attempts += 1
+                self._leader_post_align_time = 0.0
+                self._leader_post_align_best_error = float(corridor_yaw_error)
+                self._leader_post_align_entry_error = float(corridor_yaw_error)
+                self._leader_post_align_prev_error = float(corridor_yaw_error)
+                self._leader_post_align_diverge_count = 0
+                self._leader_post_align_failure_reason = ""
+            lc_terminal_hold = bool(
+                self._semantic_lane_plan
+                and d_tail <= float(self.cfg.docking.lock_position_tol) + 0.08
+                and (not self._leader_post_align_active)
+                and (corridor_yaw_error <= math.radians(15.0) or self._leader_post_align_failed)
+            )
             # Keep leader steady during final docking.
-            if abs(float(leader.v)) > 0.02:
+            if self._leader_post_align_active:
+                leader_cmd, align_error, align_done, align_blocked = self._leader_post_align_command(leader=leader, follower=follower)
+                self._leader_post_align_time += float(self.cfg.control.dt)
+                self._leader_post_align_total_time += float(self.cfg.control.dt)
+                self._leader_post_align_best_error = float(min(self._leader_post_align_best_error, align_error))
+                if float(corridor_yaw_error) > float(self._leader_post_align_best_error) + math.radians(1.5):
+                    self._leader_post_align_diverge_count += 1
+                else:
+                    self._leader_post_align_diverge_count = max(0, int(self._leader_post_align_diverge_count) - 1)
+                if float(corridor_yaw_error) > float(self._leader_post_align_entry_error) + math.radians(3.0):
+                    self._leader_post_align_diverge_count = max(2, int(self._leader_post_align_diverge_count))
+                if align_done:
+                    self._leader_post_align_active = False
+                    self._leader_post_align_time = 0.0
+                    self._leader_post_align_prev_error = float(align_error)
+                elif align_blocked:
+                    self._leader_post_align_active = False
+                    self._leader_post_align_failed = True
+                    self._leader_post_align_time = 0.0
+                    self._leader_post_align_failure_reason = "LEADER_POST_ALIGN_BLOCKED"
+                    leader_cmd = self._freeze_vehicle(leader)
+                elif self._leader_post_align_diverge_count >= 2:
+                    self._leader_post_align_active = False
+                    self._leader_post_align_failed = True
+                    self._leader_post_align_time = 0.0
+                    self._leader_post_align_failure_reason = "LEADER_POST_ALIGN_DIVERGE"
+                    leader_cmd = self._freeze_vehicle(leader)
+                elif self._leader_post_align_total_time >= 5.0:
+                    self._leader_post_align_active = False
+                    self._leader_post_align_failed = True
+                    self._leader_post_align_time = 0.0
+                    self._leader_post_align_failure_reason = "LEADER_POST_ALIGN_TIMEOUT"
+                self._leader_post_align_prev_error = float(corridor_yaw_error)
+            elif lc_terminal_hold and abs(float(leader.v)) > 1e-3:
+                leader_cmd = ControlCommand(
+                    accel=float(-math.copysign(float(self.cfg.vehicle.max_decel), float(leader.v))),
+                    steer_rate=float(-leader.delta / max(self.cfg.control.dt, 1e-3)),
+                )
+            elif abs(float(leader.v)) > 0.02:
                 leader_cmd = ControlCommand(
                     accel=float(-math.copysign(float(self.cfg.vehicle.max_decel), float(leader.v))),
                     steer_rate=0.0,
@@ -574,7 +1052,14 @@ class CooperativeDockingSkill:
             # Follower approach path until near-field.
             d_goal = float(np.linalg.norm(follower.xy() - self._follower_goal.xy()))
             if (not self._near_field_active) and d_goal > 0.45 and d_tail > float(self.cfg.docking.stage_switch_distance) + 0.20:
-                approach_speed = 1.38 if self._fast_lane_certified else 1.05
+                time_cert = self._plan_time_cert
+                approach_compress = bool(
+                    time_cert is not None
+                    and bool(time_cert.active)
+                    and self._active_branch is None
+                    and (not self._vpcr_loss_attempted)
+                )
+                approach_speed = 1.38 if self._fast_lane_certified else (float(time_cert.approach_speed_mps) if approach_compress else 1.05)
                 follower_cmd, _ = self._tracker.command(
                     state=follower,
                     goal=self._follower_goal,
@@ -584,10 +1069,20 @@ class CooperativeDockingSkill:
                     other=leader,
                 )
                 self._follower_substage = "APPROACH_PATH"
+                debug_substage = "APPROACH_PATH"
             else:
                 self._near_field_active = True
                 # Near-field: capture-funnel + MPPI micro-maneuver + lock assist.
-                if not have_global:
+                if self._leader_post_align_active:
+                    follower_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
+                    self._follower_substage = "LEADER_POST_ALIGN"
+                    debug_substage = "LEADER_POST_ALIGN"
+                elif post_align_needed and self._leader_post_align_failed:
+                    follower_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
+                    failure_reason = str(self._leader_post_align_failure_reason or "LEADER_POST_ALIGN_TIMEOUT")
+                    self._follower_substage = failure_reason
+                    debug_substage = failure_reason
+                elif not have_global:
                     follower_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
                     fallback_global = True
                     fallback_reason = "missing_global"
@@ -602,9 +1097,14 @@ class CooperativeDockingSkill:
                     yaw_diff = float(angle_diff(float(yaw_est), float(follower.yaw)))
                     yaw_err = abs(float(yaw_diff))
 
-                    if self.options.enable_micro_replan and d_tail <= 1.0 and float(yaw_err) > math.radians(30.0):
+                    if lc_terminal_hold:
+                        follower_cmd = self._lc_terminal_lock_command(follower=follower, leader=leader)
+                        self._follower_substage = "LC_LOCK_HOLD"
+                        debug_substage = "LC_LOCK_HOLD"
+                    elif self.options.enable_micro_replan and d_tail <= 1.0 and float(yaw_err) > math.radians(30.0):
                         follower_cmd = ControlCommand(accel=-0.9, steer_rate=0.0)
                         self._follower_substage = "YAW_BACKOFF"
+                        debug_substage = "YAW_BACKOFF"
                     else:
                         if self.options.enable_capture_funnel:
                             follower_cmd = self._bcfd_near_field(
@@ -614,6 +1114,7 @@ class CooperativeDockingSkill:
                                 yaw_target=float(yaw_est),
                             )
                             self._follower_substage = "FUNNEL_ALIGN"
+                            debug_substage = "FUNNEL_ALIGN"
                         else:
                             target_speed = float(clamp(0.20 + 0.35 * d_tail, 0.10, 0.55))
                             follower_cmd = self._tracker.tracker.track_point(
@@ -624,6 +1125,7 @@ class CooperativeDockingSkill:
                                 target_speed,
                             )
                             self._follower_substage = "DIRECT_TRACK"
+                            debug_substage = "DIRECT_TRACK"
 
                     if self.options.enable_fallback and d_tail <= float(self.cfg.docking.stage_switch_distance) and (not visual_valid):
                         fallback_global = True
@@ -635,22 +1137,26 @@ class CooperativeDockingSkill:
 
                     # Hard speed clamp in contact neighborhood to prevent "high-speed touch-and-pass".
                     if d_tail <= 0.55:
-                        v_cap = 0.16 if d_tail > 0.30 else 0.08
-                        if abs(float(follower.v)) > float(v_cap):
+                        basin_boost = bool(self._terminal_capture_boost and visual_valid and yaw_err <= math.radians(12.0) and abs(y_l) <= 0.26)
+                        v_cap = (0.45 if d_tail > 0.30 else 0.28) if basin_boost else (0.16 if d_tail > 0.30 else 0.08)
+                        if self._follower_substage != "LC_LOCK_HOLD" and abs(float(follower.v)) > float(v_cap):
                             follower_cmd = ControlCommand(
                                 accel=float(-math.copysign(float(self.cfg.vehicle.max_decel), float(follower.v))),
                                 steer_rate=float(follower_cmd.steer_rate),
                             )
                             self._follower_substage = "SPEED_CLAMP"
+                            debug_substage = "SPEED_CLAMP"
 
                     # Contact lock-assist: prioritize speed/yaw matching in the final centimeters.
-                    if self.options.enable_capture_funnel and d_tail <= max(0.18 if self._fast_lane_certified else 0.25, 2.5 * float(self.cfg.docking.lock_position_tol)):
+                    lock_enter = max(0.18 if self._fast_lane_certified else (1.10 if self._terminal_capture_boost and visual_valid and yaw_err <= math.radians(12.0) and abs(y_l) <= 0.26 else 0.25), 2.5 * float(self.cfg.docking.lock_position_tol))
+                    if self.options.enable_capture_funnel and d_tail <= lock_enter and self._follower_substage != "LC_LOCK_HOLD":
                         max_rate = math.radians(float(self.cfg.vehicle.max_steer_rate_deg_s))
                         dmax = math.radians(float(self.cfg.vehicle.max_steer_deg))
-                        v_ref = float(leader.v) + 1.1 * float(clamp(float(x_l), -0.08, 0.08))
+                        v_span = 0.38 if self._terminal_capture_boost else 0.08
+                        v_ref = float(leader.v) + 1.1 * float(clamp(float(x_l), -v_span, v_span))
                         if abs(float(x_l)) < 0.03 and abs(float(y_l)) < 0.02 and float(yaw_err) < math.radians(3.0):
                             v_ref = float(leader.v)
-                        v_ref = float(clamp(v_ref, -0.12, 0.12))
+                        v_ref = float(clamp(v_ref, -0.16 if self._terminal_capture_boost else -0.12, 0.50 if self._terminal_capture_boost else 0.12))
                         v_term = abs(float(follower.v)) + 0.25
                         delta_ref = float(yaw_diff + math.atan2(2.2 * float(y_l), float(v_term)))
                         delta_ref = float(clamp(delta_ref, -dmax, dmax))
@@ -664,7 +1170,7 @@ class CooperativeDockingSkill:
                         )
                         follower_cmd = ControlCommand(accel=accel, steer_rate=steer_rate)
                         self._follower_substage = "LOCK_ASSIST"
-
+                        debug_substage = "LOCK_ASSIST"
         # Safety projection (exact collision checks, 1-step).
         if self.options.enable_safety_projection:
             leader_cmd = self._project_safe(ego=leader, cmd=leader_cmd, other=follower, allow_contact=False)
@@ -694,10 +1200,24 @@ class CooperativeDockingSkill:
                 self.collision.min_clearance_vehicle_obstacles(leader, self.obstacles),
             )
         )
+        certified_terminal_projection = False
+        if self._semantic_lane_plan:
+            rear_hitch = self.geom.rear_hitch(leader)
+            front_hitch = self.geom.front_hitch(follower)
+            rel_world = rear_hitch - front_hitch
+            lc_now = math.cos(float(leader.yaw))
+            ls_now = math.sin(float(leader.yaw))
+            y_l_now = float(-ls_now * float(rel_world[0]) + lc_now * float(rel_world[1]))
+            certified_terminal_projection = bool(
+                float(d_tail) <= 0.86
+                and abs(float(angle_diff(float(leader.yaw), float(follower.yaw)))) <= math.radians(13.0)
+                and abs(float(y_l_now)) <= 0.30
+                and float(min_clear) >= float(self.cfg.safety.min_clearance) + 0.01
+            )
 
         dbg = DockSkillDebug(
-            stage=str(self._stage),
-            follower_substage=str(self._follower_substage),
+            stage=str(debug_stage),
+            follower_substage=str(debug_substage),
             leader_relocated=bool(self._leader_relocated),
             d_tail=float(d_tail),
             w_vis=float(w_vis),
@@ -709,5 +1229,6 @@ class CooperativeDockingSkill:
             min_clearance=float(min_clear),
             visual_lost_time=float(self._visual_lost_time),
             replan_count=int(self._replan_count),
+            terminal_capture_boost=bool(self._terminal_capture_boost or certified_terminal_projection),
         )
         return leader_cmd, follower_cmd, dbg

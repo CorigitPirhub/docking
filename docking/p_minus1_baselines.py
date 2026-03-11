@@ -28,7 +28,11 @@ class PMinus1MethodSpec:
 
 
 METHOD_SPECS: dict[str, PMinus1MethodSpec] = {
-    "co_bcfd": PMinus1MethodSpec("co_bcfd", "full", "Co-BCFD full skill with cooperative staging and belief-consistent funnel control."),
+    "co_bcfd": PMinus1MethodSpec("co_bcfd", "full", "Co-BCFD mainline with cooperative staging, CGFL, gated TVT/VPCR, plan-certified SC/EC time compression, terminal capture boost, and belief-consistent funnel control."),
+    "S25_cgfl_only": PMinus1MethodSpec("S25_cgfl_only", "stage25", "Stage-2.5 baseline with CGFL only; TVT/VPCR disabled."),
+    "S25_tvt_only": PMinus1MethodSpec("S25_tvt_only", "stage25", "Stage-2.5 branch eval: TVT enabled, VPCR disabled."),
+    "S25_vpcr_only": PMinus1MethodSpec("S25_vpcr_only", "stage25", "Stage-2.5 branch eval: VPCR enabled, TVT disabled."),
+    "S25_tvt_vpcr": PMinus1MethodSpec("S25_tvt_vpcr", "stage25", "Stage-2.5 branch eval: TVT and VPCR both enabled."),
     "T_global_only": PMinus1MethodSpec("T_global_only", "weak", "Global-only two-stage interception without visual feedback in-loop."),
     "T_hard_switch": PMinus1MethodSpec("T_hard_switch", "weak", "Two-stage baseline with hard GNSS-to-vision switching."),
     "T_pure_pursuit": PMinus1MethodSpec("T_pure_pursuit", "weak", "Pure geometric go-to-point / pursuit baseline without strong local planning."),
@@ -40,6 +44,8 @@ METHOD_SPECS: dict[str, PMinus1MethodSpec] = {
     "A_no_belief_gate": PMinus1MethodSpec("A_no_belief_gate", "ablation", "Replace belief-consistent fusion with distance-only blend."),
     "A_no_funnel_gate": PMinus1MethodSpec("A_no_funnel_gate", "ablation", "Disable capture-funnel/contact gating in the near field."),
     "A_no_micro_maneuver": PMinus1MethodSpec("A_no_micro_maneuver", "ablation", "Disable near-field micro replan / backoff recovery."),
+    "A_no_corridor_reciprocity": PMinus1MethodSpec("A_no_corridor_reciprocity", "ablation", "Disable lane-constrained corridor reciprocity and fall back to generic cooperative staging."),
+    "A_no_lc_hybrid_search": PMinus1MethodSpec("A_no_lc_hybrid_search", "ablation", "Keep lane-constrained reciprocal staging, but replace the hybrid primitive search + basin certificate with the retained legacy reciprocal planner."),
     "A_no_fallback": PMinus1MethodSpec("A_no_fallback", "ablation", "Disable visual-loss fallback logic."),
     "A_no_safety_projection": PMinus1MethodSpec("A_no_safety_projection", "ablation", "Disable one-step safety projection layer."),
     "A_no_stage_no_belief": PMinus1MethodSpec("A_no_stage_no_belief", "ablation", "Disable staging and belief-consistent fusion together."),
@@ -62,6 +68,8 @@ ABLATION_METHOD_IDS = [
     "A_no_belief_gate",
     "A_no_funnel_gate",
     "A_no_micro_maneuver",
+    "A_no_corridor_reciprocity",
+    "A_no_lc_hybrid_search",
     "A_no_fallback",
     "A_no_safety_projection",
     "A_no_stage_no_belief",
@@ -73,6 +81,8 @@ CORE_ABLATION_METHOD_IDS = [
     "A_no_belief_gate",
     "A_no_funnel_gate",
     "A_no_micro_maneuver",
+    "A_no_corridor_reciprocity",
+    "A_no_lc_hybrid_search",
 ]
 
 STRONG_METHOD_IDS = [mid for mid, spec in METHOD_SPECS.items() if spec.family == "strong"]
@@ -141,11 +151,12 @@ class CoopBaselineRunner:
     def compute_commands(self, *, leader: VehicleState, follower: VehicleState, timestamp: float, obstacles: list[Obstacle]):
         _ = timestamp
         if self.stage == "STAGING":
+            semantic_lane = str(self.staging_plan.reason) == "semantic_anchor"
             cmd_l, leader_done = self.staging_tracker.command(
                 state=leader,
                 goal=self.staging_plan.leader_goal,
                 path_xy=self.staging_plan.leader_path_xy,
-                target_speed=0.55,
+                target_speed=0.16 if semantic_lane else 0.55,
                 obstacles=obstacles,
                 other=follower,
             )
@@ -153,7 +164,7 @@ class CoopBaselineRunner:
                 state=follower,
                 goal=self.staging_plan.follower_goal,
                 path_xy=self.staging_plan.follower_path_xy,
-                target_speed=0.78,
+                target_speed=0.24 if semantic_lane else 0.78,
                 obstacles=obstacles,
                 other=leader,
             )
@@ -201,6 +212,7 @@ class StaticPredockRunner:
         leader_init: VehicleState,
         follower_init: VehicleState,
         mode: str,
+        lane_hints: dict[str, Any] | None = None,
     ) -> None:
         self.cfg = cfg
         self.mode = str(mode)
@@ -215,6 +227,7 @@ class StaticPredockRunner:
             leader=leader_init,
             follower=follower_init,
             prefer_static_leader=True,
+            semantic_hints=lane_hints,
         )
         self.stage = "PREDOCK"
         self.gs = GlobalPoseSensor(cfg.sensors.global_sensor, seed=int(seed) + 11)
@@ -344,6 +357,7 @@ def build_method_runners(
     leader_init: VehicleState,
     follower_init: VehicleState,
     staging_plan: StagingPlan,
+    lane_hints: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     collision = CollisionEngine(cfg.vehicle, cfg.safety)
     tracker = PathTrackingController(cfg.vehicle, cfg.control, steering_mode="pure_pursuit")
@@ -363,12 +377,30 @@ def build_method_runners(
     def make_skill(options: DockSkillOptions) -> CooperativeDockingSkill:
         plan = staging_plan
         prefer_static = not options.enable_cooperative_staging
+        if (not options.enable_corridor_reciprocity) and str(getattr(plan, "control_mode", "generic")) == "corridor_reciprocal":
+            plan = CooperativeStagingPlanner(cfg, seed=int(seed) + 451).plan(
+                obstacles=obstacles,
+                leader=leader_init,
+                follower=follower_init,
+                prefer_static_leader=False,
+                semantic_hints={},
+            )
+        if bool(options.enable_corridor_reciprocity) and (not bool(options.enable_lc_hybrid_search)) and str(getattr(plan, "control_mode", "generic")) == "corridor_reciprocal":
+            plan = CooperativeStagingPlanner(cfg, seed=int(seed) + 461).plan(
+                obstacles=obstacles,
+                leader=leader_init,
+                follower=follower_init,
+                prefer_static_leader=False,
+                semantic_hints=lane_hints,
+                use_lc_hybrid_search=False,
+            )
         if prefer_static:
             plan = CooperativeStagingPlanner(cfg, seed=int(seed) + 401).plan(
                 obstacles=obstacles,
                 leader=leader_init,
                 follower=follower_init,
                 prefer_static_leader=True,
+                semantic_hints=lane_hints,
             )
         return CooperativeDockingSkill(
             cfg,
@@ -378,11 +410,16 @@ def build_method_runners(
             follower_init=follower_init,
             prefer_static_leader=prefer_static,
             plan=plan,
+            lane_hints=lane_hints,
             options=options,
         )
 
     runners: dict[str, Any] = {
         "co_bcfd": SkillRunner(make_skill(DockSkillOptions())),
+        "S25_cgfl_only": SkillRunner(make_skill(DockSkillOptions(enable_terminal_viability_tube=False, enable_visibility_persistent_restaging=False))),
+        "S25_tvt_only": SkillRunner(make_skill(DockSkillOptions(enable_terminal_viability_tube=True, enable_visibility_persistent_restaging=False))),
+        "S25_vpcr_only": SkillRunner(make_skill(DockSkillOptions(enable_terminal_viability_tube=False, enable_visibility_persistent_restaging=True))),
+        "S25_tvt_vpcr": SkillRunner(make_skill(DockSkillOptions(enable_terminal_viability_tube=True, enable_visibility_persistent_restaging=True))),
         "T_global_only": StaticLeaderRunner(cfg, make_baseline("global_only", seed_offset=0)),
         "T_hard_switch": StaticLeaderRunner(cfg, make_baseline("hard_switch", seed_offset=10)),
         "T_pure_pursuit": StaticLeaderRunner(cfg, make_baseline("pure_pursuit", seed_offset=20)),
@@ -393,6 +430,7 @@ def build_method_runners(
             leader_init=leader_init,
             follower_init=follower_init,
             mode="lattice_pbvs",
+            lane_hints=lane_hints,
         ),
         "T_parking_hierarchical": StaticPredockRunner(
             cfg,
@@ -401,6 +439,7 @@ def build_method_runners(
             leader_init=leader_init,
             follower_init=follower_init,
             mode="parking_hierarchical",
+            lane_hints=lane_hints,
         ),
         "T_coop_hard_switch": CoopBaselineRunner(
             cfg,
@@ -418,6 +457,8 @@ def build_method_runners(
         "A_no_belief_gate": SkillRunner(make_skill(DockSkillOptions(fusion_mode="dist_blend"))),
         "A_no_funnel_gate": SkillRunner(make_skill(DockSkillOptions(enable_capture_funnel=False))),
         "A_no_micro_maneuver": SkillRunner(make_skill(DockSkillOptions(enable_micro_replan=False))),
+        "A_no_corridor_reciprocity": SkillRunner(make_skill(DockSkillOptions(enable_corridor_reciprocity=False))),
+        "A_no_lc_hybrid_search": SkillRunner(make_skill(DockSkillOptions(enable_lc_hybrid_search=False))),
         "A_no_fallback": SkillRunner(make_skill(DockSkillOptions(enable_fallback=False))),
         "A_no_safety_projection": SkillRunner(make_skill(DockSkillOptions(enable_safety_projection=False))),
         "A_no_stage_no_belief": SkillRunner(

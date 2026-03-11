@@ -48,6 +48,8 @@ class LocalPlanner:
         dynamic_others: list[VehicleState],
         *,
         force_goal_yaw: bool = False,
+        target_speed: float | None = None,
+        allow_reverse: bool = False,
     ) -> PlanningResult:
         # Prepare static obstacles once per plan_step call to avoid re-allocating polygons/bboxes
         # for every candidate and horizon step.
@@ -73,11 +75,14 @@ class LocalPlanner:
         found = False
 
         # Nominal command steers toward goal and keeps moving.
+        desired_speed = float(target_speed) if target_speed is not None else (0.8 if not allow_reverse else 0.4)
         dx, dy = goal_xy[0] - ego.x, goal_xy[1] - ego.y
         desired_yaw = math.atan2(dy, dx)
+        if allow_reverse and desired_speed < -1e-6:
+            desired_yaw = float(desired_yaw + math.pi)
         yaw_err = angle_diff(desired_yaw, ego.yaw)
-        nominal_a = 0.8 if ego.v < 0.8 else 0.0
-        nominal_sr = clamp(yaw_err / max(self.dt, 1e-3), -math.radians(20.0), math.radians(20.0))
+        nominal_a = float(clamp(1.4 * (desired_speed - ego.v), -self.vehicle_cfg.max_decel, self.vehicle_cfg.max_accel))
+        nominal_sr = clamp(yaw_err / max(self.dt, 1e-3), -math.radians(25.0), math.radians(25.0))
 
         candidates: list[tuple[float, float]] = [(nominal_a, nominal_sr)]
         for a in self.planner_cfg.sample_accel:
@@ -136,8 +141,10 @@ class LocalPlanner:
             dist_final = float(math.hypot(float(goal_xy[0] - final.x), float(goal_xy[1] - final.y)))
             dist_cost = dist_final
             desired_heading = math.atan2(goal_xy[1] - final.y, goal_xy[0] - final.x)
+            if allow_reverse and desired_speed < -1e-6:
+                desired_heading = float(desired_heading + math.pi)
             if force_goal_yaw or dist_final < 1.0:
-                heading_ref = goal_yaw
+                heading_ref = float(goal_yaw + (math.pi if (allow_reverse and desired_speed < -1e-6) else 0.0))
             else:
                 heading_ref = desired_heading
             heading_cost = abs(angle_diff(heading_ref, final.yaw))
@@ -154,14 +161,18 @@ class LocalPlanner:
             clearance_cost = 0.0 if clearance > 5.0 else 1.0 / max(float(clearance), 1e-3)
             smooth_cost = abs(a) + abs(sr)
             progress = max(0.0, dist_start - dist_final)
-            stall_penalty = max(0.0, 0.45 - final.v)
+            speed_penalty = abs(float(final.v) - float(desired_speed)) if target_speed is not None else max(0.0, 0.45 - final.v)
+            reverse_penalty = 0.0
+            if not allow_reverse and final.v < -1e-6:
+                reverse_penalty = 5.0 + 4.0 * abs(float(final.v))
 
             cost = (
                 self.planner_cfg.goal_weight * dist_cost
                 + self.planner_cfg.heading_weight * heading_cost
                 + self.planner_cfg.clearance_weight * clearance_cost
                 + self.planner_cfg.smooth_weight * smooth_cost
-                + 1.2 * stall_penalty
+                + 1.2 * speed_penalty
+                + reverse_penalty
                 - 1.5 * progress
             )
 

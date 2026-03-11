@@ -24,6 +24,7 @@ METHODS_BY_FAMILY: dict[str, list[str]] = {
     "SC": ["co_bcfd", "T_lattice_pbvs", "T_parking_hierarchical", "T_hard_switch", "A_no_belief_gate", "A_no_fallback"],
     "FC": ["co_bcfd", "T_lattice_pbvs", "T_parking_hierarchical", "A_no_funnel_gate", "A_no_micro_maneuver"],
     "EC": ["co_bcfd", "T_lattice_pbvs", "T_parking_hierarchical", "A_no_stage"],
+    "LC": ["co_bcfd", "T_lattice_pbvs", "T_parking_hierarchical", "T_coop_hard_switch", "A_no_stage"],
 }
 
 
@@ -114,6 +115,13 @@ def _scene_score(scene: dict[str, Any], result: dict[str, Any]) -> dict[str, Any
             or int(co.get("replan_count", 0)) > 0
         )
         score = 10 * int(co["success"]) + 4 * int(strong_success) + 4 * mechanism + 2 * int(float(descriptors["dock_zone_clearance_m"]) <= 0.95 + 1e-9)
+    elif family == "LC":
+        mechanism = int(
+            (not metrics["A_no_stage"]["success"])
+            and float(scene.get("audit", {}).get("leader_reverse_turn_required", descriptors.get("leader_reverse_turn_required", 0.0))) >= 0.05
+        )
+        lane_fidelity = int(bool(scene.get("audit", {}).get("lane_fidelity", False)))
+        score = 12 * int(co["success"]) + 4 * lane_fidelity + 4 * mechanism + 2 * int(float(descriptors.get("heading_diff_deg", 0.0)) >= 12.0)
     else:
         mechanism = int(not metrics["A_no_stage"]["success"])
         score = 12 * int(co["success"]) + 4 * mechanism + 2 * int(scene["scenario"]["leader_relocation_m"] >= 0.72 - 1e-9)

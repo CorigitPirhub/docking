@@ -56,11 +56,19 @@ def _path_sine(x_start: float, x_end: float, y_base: float, amp: float, period: 
     return np.stack([xs, ys], axis=1)
 
 
-def _project_follower_locked(geom: VehicleGeometry, follower: VehicleState, target_tail: VehicleState) -> VehicleState:
+def _project_follower_locked(
+    geom: VehicleGeometry,
+    follower: VehicleState,
+    target_tail: VehicleState,
+    *,
+    collision: CollisionEngine | None = None,
+    obstacles: list[Obstacle] | None = None,
+    clearance_floor: float | None = None,
+) -> VehicleState:
     anchor = geom.rear_hitch(target_tail)
     yaw = target_tail.yaw
     rear = anchor - np.array([math.cos(yaw), math.sin(yaw)], dtype=float) * geom.front_hitch_x
-    return VehicleState(
+    projected = VehicleState(
         vehicle_id=follower.vehicle_id,
         x=float(rear[0]),
         y=float(rear[1]),
@@ -69,6 +77,41 @@ def _project_follower_locked(geom: VehicleGeometry, follower: VehicleState, targ
         delta=target_tail.delta,
         mode=VehicleMode.TRAIN_FOLLOW,
     )
+    if collision is None or obstacles is None or clearance_floor is None:
+        return projected
+    current_clearance_m = float(collision.min_clearance_vehicle_obstacles(follower, obstacles))
+    projected_clearance_m = float(collision.min_clearance_vehicle_obstacles(projected, obstacles))
+    if projected_clearance_m + 1e-6 < float(clearance_floor) <= current_clearance_m + 1e-6:
+        follower_locked = follower.copy()
+        follower_locked.v = float(target_tail.v)
+        follower_locked.delta = float(target_tail.delta)
+        return follower_locked
+    return projected
+
+
+def _project_terminal_hold_pair(
+    geom: VehicleGeometry,
+    follower: VehicleState,
+    target_tail: VehicleState,
+    *,
+    collision: CollisionEngine | None = None,
+    obstacles: list[Obstacle] | None = None,
+    clearance_floor: float | None = None,
+) -> tuple[VehicleState, VehicleState]:
+    follower_hold = _project_follower_locked(
+        geom,
+        follower,
+        target_tail,
+        collision=collision,
+        obstacles=obstacles,
+        clearance_floor=clearance_floor,
+    )
+    target_hold = target_tail.copy()
+    follower_hold.v = 0.0
+    target_hold.v = 0.0
+    follower_hold.delta = 0.0
+    target_hold.delta = 0.0
+    return follower_hold, target_hold
 
 
 def _boundary_guard_command(state: VehicleState, cmd: ControlCommand, cfg: Config, margin: float = 2.5) -> ControlCommand:
@@ -330,6 +373,29 @@ def run_docking_case(
 
         follower = follower_new
 
+        if bool(str(getattr(debug, "stage", "")) == "LC_LOCK_HOLD"):
+            p_err_hold = float(np.linalg.norm(geom.front_hitch(follower) - geom.rear_hitch(target_tail)))
+            yaw_gap_hold = abs(math.atan2(math.sin(target_tail.yaw - follower.yaw), math.cos(target_tail.yaw - follower.yaw)))
+            clr_hold = float(
+                min(
+                    collision.min_clearance_vehicle_obstacles(follower, env.obstacles),
+                    collision.min_clearance_vehicle_obstacles(target_tail, env.obstacles),
+                )
+            )
+            if (
+                p_err_hold <= float(cfg.docking.lock_position_tol) + 0.06
+                and yaw_gap_hold <= math.radians(5.0)
+                and clr_hold >= float(cfg.safety.min_clearance) + 0.005
+            ):
+                follower, target_tail = _project_terminal_hold_pair(
+                    geom,
+                    follower,
+                    target_tail,
+                    collision=collision,
+                    obstacles=env.obstacles,
+                    clearance_floor=float(cfg.safety.min_clearance) + 0.005,
+                )
+
         if debug.fallback_global:
             visual_fallback_events += 1
         if debug.fallback_reason == "vision_lost":
@@ -341,12 +407,22 @@ def run_docking_case(
         p_err_pre = float(np.linalg.norm(geom.front_hitch(follower) - geom.rear_hitch(target_tail)))
         yaw_gap_pre = abs(math.atan2(math.sin(target_tail.yaw - follower.yaw), math.cos(target_tail.yaw - follower.yaw)))
         speed_gap_pre = abs(target_tail.v - follower.v)
+        lc_lock_hold = bool(str(getattr(debug, "stage", "")) == "LC_LOCK_HOLD")
         if (
+            (not lc_lock_hold)
+            and
             p_err_pre < cfg.docking.soft_capture_distance
             and yaw_gap_pre < math.radians(cfg.docking.soft_capture_max_yaw_deg)
             and speed_gap_pre < cfg.docking.soft_capture_max_speed_error
         ):
-            projected = _project_follower_locked(geom, follower, target_tail)
+            projected = _project_follower_locked(
+                geom,
+                follower,
+                target_tail,
+                collision=collision,
+                obstacles=env.obstacles,
+                clearance_floor=float(cfg.safety.min_clearance),
+            )
             corr = np.array([projected.x - follower.x, projected.y - follower.y], dtype=float)
             corr_norm = float(np.linalg.norm(corr))
             max_corr = cfg.docking.soft_capture_max_position_correction
@@ -388,7 +464,14 @@ def run_docking_case(
         history["leader_head_yaw"].append(train_states[0].yaw)
 
         if lock_cond.locked:
-            follower_locked = _project_follower_locked(geom, follower, target_tail)
+            follower_locked = _project_follower_locked(
+                geom,
+                follower,
+                target_tail,
+                collision=collision,
+                obstacles=env.obstacles,
+                clearance_floor=float(cfg.safety.min_clearance),
+            )
             pos_jump = float(np.linalg.norm(follower_locked.xy() - follower.xy()))
             yaw_jump_deg = abs(
                 math.degrees(math.atan2(math.sin(follower_locked.yaw - follower.yaw), math.cos(follower_locked.yaw - follower.yaw)))

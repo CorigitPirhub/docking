@@ -1,6 +1,6 @@
 {
   "dataset_root": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1",
-  "scene_count": 72,
+  "scene_count": 90,
   "manifest": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/dockbench_v1_manifest.json",
   "quality_report": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/dockbench_v1_quality_report.json",
   "representatives": {
@@ -47,6 +47,17 @@
       "subset_tag": "Extension-Critical",
       "max_time_s": 38.0,
       "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-EC-L2-062.json"
+    },
+    "LC_L2": {
+      "scene_id": "DBv1-LC-L2-080",
+      "split": "test",
+      "family": "LC",
+      "difficulty": "L2",
+      "seed": 20670454,
+      "style": "lane_constrained",
+      "subset_tag": "Lane-Constrained",
+      "max_time_s": 32.0,
+      "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-LC-L2-080.json"
     }
   }
 }

@@ -16,9 +16,9 @@ from .sensors import line_blocked_by_obstacles
 from .types import Obstacle, VehicleState
 
 SCHEMA_VERSION = "dockbench-v1.0"
-GENERATOR_VERSION = "dock_sgen_1.0"
+GENERATOR_VERSION = "dock_sgen_1.1"
 DATASET_NAME = "dockbench_v1"
-FAMILIES: tuple[str, ...] = ("CF", "SC", "FC", "EC")
+FAMILIES: tuple[str, ...] = ("CF", "SC", "FC", "EC", "LC")
 DIFFICULTIES: tuple[str, ...] = ("L1", "L2", "L3")
 SPLIT_COUNTS: dict[str, int] = {"tuning": 1, "test": 4, "challenge": 1}
 FAMILY_LABELS: dict[str, str] = {
@@ -26,14 +26,16 @@ FAMILY_LABELS: dict[str, str] = {
     "SC": "Switching-Critical",
     "FC": "Funnel-Critical",
     "EC": "Extension-Critical",
+    "LC": "Lane-Constrained",
 }
 STYLE_BY_FAMILY: dict[str, str] = {
     "CF": "common_feasible",
     "SC": "switching_critical",
     "FC": "funnel_critical",
     "EC": "extension_critical",
+    "LC": "lane_constrained",
 }
-REPRESENTATIVE_KEYS: tuple[str, ...] = ("CF_L2", "SC_L2", "FC_L2", "EC_L2")
+REPRESENTATIVE_KEYS: tuple[str, ...] = ("CF_L2", "SC_L2", "FC_L2", "EC_L2", "LC_L2")
 
 _DESCRIPTOR_KEYS: tuple[str, ...] = (
     "d0_m",
@@ -45,6 +47,14 @@ _DESCRIPTOR_KEYS: tuple[str, ...] = (
     "capture_constraint_index",
     "dock_zone_clearance_m",
     "homotopy_count",
+    "corridor_width_min_m",
+    "bottleneck_ratio",
+    "corridor_turn_deg_max",
+    "branch_count",
+    "drivable_area_ratio",
+    "off_lane_shortcut_gap_m",
+    "leader_reverse_turn_required",
+    "leader_micro_adjust_budget_m",
 )
 
 
@@ -162,7 +172,25 @@ def descriptor_vector(descriptors: dict[str, float]) -> np.ndarray:
 def descriptor_distance(a: dict[str, float], b: dict[str, float]) -> float:
     wa = descriptor_vector(a)
     wb = descriptor_vector(b)
-    scale = np.asarray([12.0, 35.0, 180.0, 1.0, 0.6, 2.4, 1.0, 1.5, 3.0], dtype=float)
+    scale = np.asarray([
+        12.0,
+        35.0,
+        180.0,
+        1.0,
+        0.6,
+        2.4,
+        1.0,
+        1.5,
+        3.0,
+        1.6,
+        1.0,
+        90.0,
+        3.0,
+        0.20,
+        6.0,
+        1.0,
+        3.0,
+    ], dtype=float)
     return float(np.linalg.norm((wa - wb) / scale))
 
 
@@ -186,7 +214,7 @@ def family_thresholds(family: str, difficulty: str) -> dict[str, tuple[float, fl
             "detour_factor": (1.0, {"L1": 1.14, "L2": 1.20, "L3": 1.30}[lvl]),
             "staging_shift_required_m": (0.0, {"L1": 0.30, "L2": 0.44, "L3": 0.60}[lvl]),
             "dock_zone_clearance_m": (0.35, 1e6),
-            "capture_constraint_index": (0.15, {"L1": 0.66, "L2": 0.74, "L3": 0.84}[lvl]),
+            "capture_constraint_index": ({"L1": 0.10, "L2": 0.08, "L3": 0.08}[lvl], {"L1": 0.66, "L2": 0.74, "L3": 0.84}[lvl]),
         },
         "FC": {
             "d0_m": (5.0, 9.0),
@@ -204,7 +232,22 @@ def family_thresholds(family: str, difficulty: str) -> dict[str, tuple[float, fl
             "detour_factor": ({"L1": 1.10, "L2": 1.18, "L3": 1.28}[lvl], 3.0),
             "staging_shift_required_m": ({"L1": 0.72, "L2": 1.02, "L3": 1.35}[lvl], 6.0),
             "dock_zone_clearance_m": (0.0, {"L1": 0.90, "L2": 0.76, "L3": 0.64}[lvl]),
-            "capture_constraint_index": ({"L1": 0.20, "L2": 0.36, "L3": 0.44}[lvl], 1.0),
+            "capture_constraint_index": ({"L1": 0.16, "L2": 0.36, "L3": 0.44}[lvl], 1.0),
+        },
+        "LC": {
+            "d0_m": ({"L1": 5.0, "L2": 5.4, "L3": 4.8}[lvl], {"L1": 9.5, "L2": 10.0, "L3": 10.5}[lvl]),
+            "heading_diff_deg": ({"L1": 0.0, "L2": 12.0, "L3": 28.0}[lvl], {"L1": 16.0, "L2": 38.0, "L3": 75.0}[lvl]),
+            "detour_factor": ({"L1": 1.08, "L2": 1.12, "L3": 1.18}[lvl], 2.6),
+            "staging_shift_required_m": ({"L1": 0.20, "L2": 0.55, "L3": 0.95}[lvl], 4.0),
+            "corridor_width_min_m": ({"L1": 1.45, "L2": 1.20, "L3": 0.95}[lvl], {"L1": 2.20, "L2": 1.90, "L3": 1.60}[lvl]),
+            "bottleneck_ratio": (0.25, 1.0),
+            "corridor_turn_deg_max": (0.0, {"L1": 25.0, "L2": 45.0, "L3": 65.0}[lvl]),
+            "branch_count": (1.0, 3.0),
+            "drivable_area_ratio": (0.04, 0.22),
+            "off_lane_shortcut_gap_m": ({"L1": 0.75, "L2": 1.00, "L3": 1.25}[lvl], 8.0),
+            "leader_reverse_turn_required": ({"L1": 0.0, "L2": 0.30, "L3": 0.65}[lvl], 1.0),
+            "leader_micro_adjust_budget_m": ({"L1": 0.25, "L2": 0.70, "L3": 1.15}[lvl], 4.0),
+            "capture_constraint_index": ({"L1": 0.16, "L2": 0.28, "L3": 0.40}[lvl], 1.0),
         },
     }
     return thresholds[fam]
@@ -223,6 +266,13 @@ def label_fidelity(*, family: str, difficulty: str, descriptors: dict[str, float
         return False
     if fam == "FC" and float(descriptors["dock_zone_clearance_m"]) > 1.05:
         return False
+    if fam == "LC":
+        if float(descriptors.get("corridor_width_min_m", 0.0)) <= 0.0:
+            return False
+        if float(descriptors.get("off_lane_shortcut_gap_m", 0.0)) < 0.75:
+            return False
+        if float(descriptors.get("leader_micro_adjust_budget_m", 0.0)) < 0.20:
+            return False
     return True
 
 
@@ -236,6 +286,7 @@ def compute_descriptors(
     obstacle_roles: Sequence[str],
     family: str | None = None,
     difficulty: str | None = None,
+    lane_meta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     geom = VehicleGeometry(cfg.vehicle)
     rear = geom.rear_hitch(leader)
@@ -256,6 +307,17 @@ def compute_descriptors(
     dock_role_count = float(sum(1 for role in obstacle_roles if role == "dock_zone"))
     background_count = float(sum(1 for role in obstacle_roles if role == "background"))
 
+    lane = dict(lane_meta or {})
+    corridor_width_min = float(lane.get("corridor_width_min_m", 0.0))
+    bottleneck_ratio = float(lane.get("bottleneck_ratio", 0.0))
+    corridor_turn_deg = float(lane.get("corridor_turn_deg_max", 0.0))
+    branch_count = float(lane.get("branch_count", 0.0))
+    drivable_area_ratio = float(lane.get("drivable_area_ratio", 1.0 if fam != "LC" else 0.0))
+    off_lane_shortcut_gap = float(lane.get("off_lane_shortcut_gap_m", 0.0))
+    leader_reverse_turn_required = float(lane.get("leader_reverse_turn_required", 0.0))
+    leader_micro_adjust_budget = float(lane.get("leader_micro_adjust_budget_m", 0.0))
+    lane_fidelity = bool(lane.get("lane_fidelity", False if fam == "LC" else True))
+
     if fam == "CF":
         stage_shift = 0.03 + 0.05 * level_bias + 0.03 * channel_count + 0.06 * max(0.65 - dock_clearance, 0.0)
         detour_factor = 1.00 + 0.01 * background_count + 0.02 * channel_count + 0.02 * level_bias
@@ -268,6 +330,9 @@ def compute_descriptors(
     elif fam == "EC":
         stage_shift = 0.74 + 0.35 * screen_count + 0.18 * channel_count + 0.22 * max(0.75 - dock_clearance, 0.0) + 0.10 * level_bias
         detour_factor = 1.10 + 0.06 * screen_count + 0.04 * channel_count + 0.03 * background_count + 0.07 * level_bias
+    elif fam == "LC":
+        stage_shift = float(max(0.20, leader_micro_adjust_budget))
+        detour_factor = float(max(1.05, 1.02 + 0.08 * branch_count + 0.12 * max(0.0, 1.0 - bottleneck_ratio)))
     else:
         stage_shift = 0.06 + 0.08 * blocked + 0.06 * channel_count + 0.04 * max(0.75 - dock_clearance, 0.0)
         detour_factor = 1.00 + 0.04 * blocked + 0.01 * background_count + 0.02 * channel_count
@@ -278,7 +343,9 @@ def compute_descriptors(
     clearance_term = float(clamp((0.95 - dock_clearance) / 0.95, 0.0, 1.0))
     detour_term = float(clamp((detour_factor - 1.0) / 0.55, 0.0, 1.0))
     stage_term = float(clamp(stage_shift / 2.0, 0.0, 1.0))
-    capture_constraint = float(clamp(0.36 * heading_term + 0.34 * clearance_term + 0.18 * detour_term + 0.12 * stage_term, 0.0, 1.0))
+    lane_width_term = float(clamp((1.8 - corridor_width_min) / 1.2, 0.0, 1.0)) if corridor_width_min > 0.0 else 0.0
+    reverse_term = float(clamp(leader_reverse_turn_required, 0.0, 1.0))
+    capture_constraint = float(clamp(0.32 * heading_term + 0.26 * clearance_term + 0.14 * detour_term + 0.10 * stage_term + 0.10 * lane_width_term + 0.08 * reverse_term, 0.0, 1.0))
     boundary_margin = min(_boundary_margin(cfg, leader), _boundary_margin(cfg, follower))
     homotopy_count = _estimate_homotopy_count(obstacle_roles, blocked=blocked, clutter_ratio=clutter_ratio)
 
@@ -294,6 +361,14 @@ def compute_descriptors(
         "dock_zone_clearance_m": dock_clearance,
         "staging_shift_required_m": stage_shift,
         "capture_constraint_index": capture_constraint,
+        "corridor_width_min_m": float(corridor_width_min),
+        "bottleneck_ratio": float(bottleneck_ratio),
+        "corridor_turn_deg_max": float(corridor_turn_deg),
+        "branch_count": float(branch_count),
+        "drivable_area_ratio": float(drivable_area_ratio),
+        "off_lane_shortcut_gap_m": float(off_lane_shortcut_gap),
+        "leader_reverse_turn_required": float(leader_reverse_turn_required),
+        "leader_micro_adjust_budget_m": float(leader_micro_adjust_budget),
     }
     leader_goal = leader.copy()
     leader_goal.x = float(leader.x + stage_shift * math.cos(float(leader.yaw)))
@@ -314,6 +389,8 @@ def compute_descriptors(
         },
         "direct_los_blocked": blocked,
         "large_obstacle_present": bool(any(max(float(obs.width), float(obs.height)) >= 2.8 for obs in obstacles)),
+        "lane": lane,
+        "lane_fidelity": bool(lane_fidelity),
     }
     return descriptors, aux
 
@@ -326,14 +403,16 @@ def quality_record(
     direct_los_blocked: bool,
     existing_cell_descriptors: Sequence[dict[str, float]],
     cell_fill_ratio: float,
+    lane_fidelity: bool = True,
 ) -> dict[str, Any]:
     valid = bool(
         descriptors["boundary_margin_m"] >= 0.65
         and descriptors["dock_zone_clearance_m"] >= 0.0
         and math.isfinite(descriptors["detour_factor"])
         and descriptors["d0_m"] >= 4.5
+        and bool(lane_fidelity)
     )
-    label_ok = bool(label_fidelity(family=family, difficulty=difficulty, descriptors=descriptors, direct_los_blocked=direct_los_blocked))
+    label_ok = bool(label_fidelity(family=family, difficulty=difficulty, descriptors=descriptors, direct_los_blocked=direct_los_blocked) and bool(lane_fidelity))
     if existing_cell_descriptors:
         diversity = min(descriptor_distance(descriptors, other) for other in existing_cell_descriptors)
         diversity_score = float(clamp(diversity / 0.18, 0.0, 1.0))
@@ -346,6 +425,7 @@ def quality_record(
     return {
         "valid": valid,
         "label_fidelity": label_ok,
+        "lane_fidelity": bool(lane_fidelity),
         "diversity_score": diversity_score,
         "balance_score": balance_score,
         "scene_quality_score": scene_quality,
@@ -371,6 +451,7 @@ def build_scene_payload(
     aux: dict[str, Any],
 ) -> dict[str, Any]:
     family_code = str(family).upper()
+    lane_payload = dict(aux.get("lane", {})) if isinstance(aux.get("lane", {}), dict) else {}
     scenario = {
         "seed": int(seed),
         "style": style_for_family(family_code),
@@ -383,6 +464,7 @@ def build_scene_payload(
         "direct_los_blocked": bool(aux["direct_los_blocked"]),
         "large_obstacle_present": bool(aux["large_obstacle_present"]),
         "subset_tag": family_label(family_code),
+        "lane_constrained": bool(lane_payload.get("enabled", False)),
     }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -412,10 +494,14 @@ def build_scene_payload(
         ],
         "descriptors": {k: float(v) for k, v in descriptors.items()},
         "quality": {k: (bool(v) if isinstance(v, bool) else float(v)) for k, v in quality.items()},
+        "lane": lane_payload,
         "audit": {
             "direct_los_blocked": bool(aux["direct_los_blocked"]),
             "large_obstacle_present": bool(aux["large_obstacle_present"]),
             "stage_plan": aux["stage_plan"],
+            "lane_fidelity": bool(aux.get("lane_fidelity", True)),
+            "off_lane_shortcut_gap_m": float(descriptors.get("off_lane_shortcut_gap_m", 0.0)),
+            "leader_reverse_turn_required": float(descriptors.get("leader_reverse_turn_required", 0.0)),
         },
         "scenario": scenario,
     }

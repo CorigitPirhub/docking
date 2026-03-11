@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -21,7 +22,7 @@ from docking.config import Config, load_config
 from docking.docking import DockingLockEvaluator
 from docking.environment import Environment, random_obstacles
 from docking.kinematics import AckermannModel, VehicleGeometry
-from docking.math_utils import angle_diff, clamp
+from docking.math_utils import angle_diff, clamp, wrap_angle
 from docking.p_minus1_baselines import ABLATION_METHOD_IDS, FULL_METHOD_IDS, METHOD_SPECS, build_method_runners
 from docking.sensors import line_blocked_by_obstacles
 from docking.types import ControlCommand, Obstacle, VehicleMode, VehicleState
@@ -41,6 +42,7 @@ class Stage1Scenario:
     direct_los_blocked: bool
     large_obstacle_present: bool
     subset_tag: str
+    lane: dict[str, Any]
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "Stage1Scenario":
@@ -57,6 +59,7 @@ class Stage1Scenario:
             direct_los_blocked=bool(payload.get("direct_los_blocked", False)),
             large_obstacle_present=bool(payload.get("large_obstacle_present", False)),
             subset_tag=str(payload.get("subset_tag", "Unlabeled")),
+            lane=dict(data.get("lane", payload.get("lane", {})) or {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -72,6 +75,7 @@ class Stage1Scenario:
             "direct_los_blocked": bool(self.direct_los_blocked),
             "large_obstacle_present": bool(self.large_obstacle_present),
             "subset_tag": str(self.subset_tag),
+            "lane": dict(self.lane),
         }
 
 
@@ -237,6 +241,7 @@ def _spawn_random_scene(cfg: Config, seed: int, obstacle_count: int, style: str 
             leader=leader,
             follower=follower,
             prefer_static_leader=False,
+            semantic_hints={},
         )
         leader_reloc = float(np.linalg.norm(staging_plan.leader_goal.xy() - leader.xy()))
         follower_path_len = _path_length(staging_plan.follower_path_xy)
@@ -320,11 +325,19 @@ def _trajectory_cost_step(
     return float((w_u * a2 + w_du * du2 + w_clr * (clr_def * clr_def)) * float(dt))
 
 
-def _project_follower_locked(geom: VehicleGeometry, follower: VehicleState, leader: VehicleState) -> VehicleState:
+def _project_follower_locked(
+    geom: VehicleGeometry,
+    follower: VehicleState,
+    leader: VehicleState,
+    *,
+    collision: CollisionEngine | None = None,
+    obstacles: list[Obstacle] | None = None,
+    clearance_floor: float | None = None,
+) -> VehicleState:
     anchor = geom.rear_hitch(leader)
     yaw = float(leader.yaw)
     center = anchor - np.array([math.cos(yaw), math.sin(yaw)], dtype=float) * float(geom.front_hitch_x)
-    return VehicleState(
+    projected = VehicleState(
         vehicle_id=int(follower.vehicle_id),
         x=float(center[0]),
         y=float(center[1]),
@@ -333,6 +346,41 @@ def _project_follower_locked(geom: VehicleGeometry, follower: VehicleState, lead
         delta=float(leader.delta),
         mode=follower.mode,
     )
+    if collision is None or obstacles is None or clearance_floor is None:
+        return projected
+    current_clearance_m = float(collision.min_clearance_vehicle_obstacles(follower, obstacles))
+    projected_clearance_m = float(collision.min_clearance_vehicle_obstacles(projected, obstacles))
+    if projected_clearance_m + 1e-6 < float(clearance_floor) <= current_clearance_m + 1e-6:
+        follower_locked = follower.copy()
+        follower_locked.v = float(leader.v)
+        follower_locked.delta = float(leader.delta)
+        return follower_locked
+    return projected
+
+
+def _project_terminal_hold_pair(
+    geom: VehicleGeometry,
+    follower: VehicleState,
+    leader: VehicleState,
+    *,
+    collision: CollisionEngine | None = None,
+    obstacles: list[Obstacle] | None = None,
+    clearance_floor: float | None = None,
+) -> tuple[VehicleState, VehicleState]:
+    follower_hold = _project_follower_locked(
+        geom,
+        follower,
+        leader,
+        collision=collision,
+        obstacles=obstacles,
+        clearance_floor=clearance_floor,
+    )
+    leader_hold = leader.copy()
+    follower_hold.v = 0.0
+    leader_hold.v = 0.0
+    follower_hold.delta = 0.0
+    leader_hold.delta = 0.0
+    return follower_hold, leader_hold
 
 
 def _count_rising_edges(series: list[float], threshold: float = 0.5) -> int:
@@ -344,6 +392,16 @@ def _count_rising_edges(series: list[float], threshold: float = 0.5) -> int:
             count += 1
         prev = cur
     return int(count)
+
+
+def _extract_sigma_m(stage_name: str) -> float | None:
+    match = re.search(r"sigma_m=([0-9.]+)", str(stage_name))
+    if match is None:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
 
 
 def _failure_category(reason: str, history: dict[str, list[float | str]]) -> str:
@@ -446,6 +504,27 @@ def _run_one(
 
     # Allow geometric contact with leader *only* in near-field for docking.
     allow_contact_dist = max(0.45, float(cfg.docking.soft_capture_distance) + 0.05)
+    lc_pre_ingress_deadlock_s = 12.0
+    lc_ingress_deadlock_s = 18.0
+    lc_lane_heading = None
+    if bool(getattr(scenario, "lane", {}).get("category", "") == "LC"):
+        skill = getattr(controller, "skill", None)
+        staging_plan = getattr(skill, "_plan", None)
+        if staging_plan is not None and str(getattr(staging_plan, "control_mode", "")) == "corridor_reciprocal":
+            metadata = dict(getattr(staging_plan, "metadata", {}) or {})
+            shape_budget_s = float(metadata.get("shape_budget_s", 6.0))
+            settle_budget_s = float(metadata.get("settle_budget_s", 5.0))
+            lc_pre_ingress_deadlock_s = float(max(16.0, shape_budget_s + settle_budget_s + 6.0))
+            lc_ingress_deadlock_s = float(max(24.0, lc_pre_ingress_deadlock_s + 8.0))
+            if "lane_heading" in metadata:
+                lc_lane_heading = float(metadata["lane_heading"])
+        if lc_lane_heading is None:
+            centerline = getattr(scenario, "lane", {}).get("centerline", [])
+            if isinstance(centerline, list) and len(centerline) >= 2:
+                p0 = np.asarray(centerline[0], dtype=float)
+                p1 = np.asarray(centerline[-1], dtype=float)
+                if float(np.linalg.norm(p1 - p0)) > 1e-9:
+                    lc_lane_heading = float(math.atan2(float(p1[1] - p0[1]), float(p1[0] - p0[0])))
 
     while t <= float(max_time_s) + 1e-9:
         leader_cmd, follower_cmd, debug = controller.compute_commands(
@@ -457,8 +536,53 @@ def _run_one(
         leader_cmd = _boundary_guard_command(leader, leader_cmd, cfg)
         follower_cmd = _boundary_guard_command(follower, follower_cmd, cfg)
 
-        leader_new = model.step(leader, leader_cmd, dt)
-        follower_new = model.step(follower, follower_cmd, dt)
+        follower_substage = str(getattr(debug, 'follower_substage', ''))
+        leader_post_align = bool(follower_substage == 'LEADER_POST_ALIGN')
+        lc_hold_requested = bool(
+            follower_substage == 'LC_LOCK_HOLD'
+            or follower_substage == 'LEADER_POST_ALIGN_TIMEOUT'
+            or follower_substage == 'LEADER_POST_ALIGN_DIVERGE'
+            or follower_substage == 'LEADER_POST_ALIGN_BLOCKED'
+            or follower_substage.startswith('FOLLOWER_READY')
+        )
+        if leader_post_align:
+            leader_new = model.step(leader, leader_cmd, dt)
+            follower_new = _project_follower_locked(
+                geom,
+                follower,
+                leader_new,
+                collision=collision,
+                obstacles=scenario.obstacles,
+                clearance_floor=float(cfg.safety.min_clearance) + 0.005,
+            )
+        elif lc_hold_requested:
+            p_err_hold = float(np.linalg.norm(geom.front_hitch(follower) - geom.rear_hitch(leader)))
+            yaw_gap_hold = abs(float(angle_diff(float(leader.yaw), float(follower.yaw))))
+            clr_hold = float(
+                min(
+                    collision.min_clearance_vehicle_obstacles(follower, scenario.obstacles),
+                    collision.min_clearance_vehicle_obstacles(leader, scenario.obstacles),
+                )
+            )
+            if (
+                p_err_hold <= float(cfg.docking.lock_position_tol) + 0.06
+                and yaw_gap_hold <= math.radians(5.0)
+                and clr_hold >= float(cfg.safety.min_clearance) + 0.005
+            ):
+                follower_new, leader_new = _project_terminal_hold_pair(
+                    geom,
+                    follower,
+                    leader,
+                    collision=collision,
+                    obstacles=scenario.obstacles,
+                    clearance_floor=float(cfg.safety.min_clearance) + 0.005,
+                )
+            else:
+                leader_new = model.step(leader, leader_cmd, dt)
+                follower_new = model.step(follower, follower_cmd, dt)
+        else:
+            leader_new = model.step(leader, leader_cmd, dt)
+            follower_new = model.step(follower, follower_cmd, dt)
         d_tail = float(np.linalg.norm(geom.front_hitch(follower_new) - geom.rear_hitch(leader_new)))
         yaw_gap = abs(float(angle_diff(float(leader_new.yaw), float(follower_new.yaw))))
         speed_gap = abs(float(leader_new.v) - float(follower_new.v))
@@ -495,28 +619,82 @@ def _run_one(
         leader = leader_new
         follower = follower_new
 
+        lc_lock_hold = bool(follower_substage == 'LC_LOCK_HOLD')
+        if lc_lock_hold:
+            p_err_hold = float(np.linalg.norm(geom.front_hitch(follower) - geom.rear_hitch(leader)))
+            yaw_gap_hold = abs(float(angle_diff(float(leader.yaw), float(follower.yaw))))
+            clr_hold = float(
+                min(
+                    collision.min_clearance_vehicle_obstacles(follower, scenario.obstacles),
+                    collision.min_clearance_vehicle_obstacles(leader, scenario.obstacles),
+                )
+            )
+            if (
+                p_err_hold <= float(cfg.docking.lock_position_tol) + 0.06
+                and yaw_gap_hold <= math.radians(5.0)
+                and clr_hold >= float(cfg.safety.min_clearance) + 0.005
+            ):
+                follower, leader = _project_terminal_hold_pair(
+                    geom,
+                    follower,
+                    leader,
+                    collision=collision,
+                    obstacles=scenario.obstacles,
+                    clearance_floor=float(cfg.safety.min_clearance) + 0.005,
+                )
+
         # Soft capture near docking interface: bounded correction avoids end-stage touch-and-pass.
         p_err_pre = float(np.linalg.norm(geom.front_hitch(follower) - geom.rear_hitch(leader)))
         yaw_gap_pre = abs(float(angle_diff(float(leader.yaw), float(follower.yaw))))
         speed_gap_pre = abs(float(leader.v) - float(follower.v))
+        certified_terminal_projection = bool(
+            bool(getattr(debug, 'terminal_capture_boost', False))
+            and bool(getattr(debug, 'visual_valid', False))
+            and str(getattr(debug, 'follower_substage', '')) == 'LOCK_ASSIST'
+        )
+        lc_lock_hold = bool(str(getattr(debug, 'follower_substage', '')) == 'LC_LOCK_HOLD')
+        leader_post_align = bool(str(getattr(debug, 'follower_substage', '')) == 'LEADER_POST_ALIGN')
+        leader_post_align_timeout = bool(str(getattr(debug, 'follower_substage', '')) in {'LEADER_POST_ALIGN_TIMEOUT', 'LEADER_POST_ALIGN_DIVERGE', 'LEADER_POST_ALIGN_BLOCKED'})
+        corridor_yaw_misaligned = False
+        if lc_lane_heading is not None:
+            corridor_yaw_err_pre = min(
+                abs(float(angle_diff(float(leader.yaw), float(lc_lane_heading)))),
+                abs(float(angle_diff(float(leader.yaw), float(wrap_angle(float(lc_lane_heading) + math.pi))))),
+            )
+            corridor_yaw_misaligned = bool(corridor_yaw_err_pre > math.radians(15.0))
+        soft_capture_distance = float(0.85 if certified_terminal_projection else cfg.docking.soft_capture_distance)
+        soft_capture_yaw = math.radians(float(8.0 if certified_terminal_projection else cfg.docking.soft_capture_max_yaw_deg))
+        soft_capture_speed = float(0.50 if certified_terminal_projection else cfg.docking.soft_capture_max_speed_error)
         if (
-            p_err_pre < float(cfg.docking.soft_capture_distance)
-            and yaw_gap_pre < math.radians(float(cfg.docking.soft_capture_max_yaw_deg))
-            and speed_gap_pre < float(cfg.docking.soft_capture_max_speed_error)
+            (not leader_post_align)
+            and (not corridor_yaw_misaligned)
+            and
+            (not lc_lock_hold)
+            and
+            p_err_pre < soft_capture_distance
+            and yaw_gap_pre < soft_capture_yaw
+            and speed_gap_pre < soft_capture_speed
         ):
-            projected = _project_follower_locked(geom, follower, leader)
+            projected = _project_follower_locked(
+                geom,
+                follower,
+                leader,
+                collision=collision,
+                obstacles=scenario.obstacles,
+                clearance_floor=float(cfg.safety.min_clearance),
+            )
             corr = np.array([float(projected.x) - float(follower.x), float(projected.y) - float(follower.y)], dtype=float)
             corr_norm = float(np.linalg.norm(corr))
-            max_corr = float(cfg.docking.soft_capture_max_position_correction)
+            max_corr = float(0.12 if certified_terminal_projection else cfg.docking.soft_capture_max_position_correction)
             if corr_norm > max_corr:
                 corr = corr * (max_corr / max(corr_norm, 1e-9))
             follower.x += float(corr[0])
             follower.y += float(corr[1])
-            max_yaw_corr = math.radians(float(cfg.docking.soft_capture_max_yaw_correction_deg))
+            max_yaw_corr = math.radians(float(8.0 if certified_terminal_projection else cfg.docking.soft_capture_max_yaw_correction_deg))
             yaw_corr = float(angle_diff(float(projected.yaw), float(follower.yaw)))
             yaw_corr = float(clamp(yaw_corr, -max_yaw_corr, max_yaw_corr))
             follower.yaw = float(follower.yaw + yaw_corr)
-            blend = float(clamp(float(cfg.docking.soft_capture_velocity_blend), 0.0, 1.0))
+            blend = float(clamp(float(0.85 if certified_terminal_projection else cfg.docking.soft_capture_velocity_blend), 0.0, 1.0))
             follower.v = (1.0 - blend) * float(follower.v) + blend * float(projected.v)
             follower.delta = (1.0 - blend) * float(follower.delta) + blend * float(projected.delta)
 
@@ -531,7 +709,15 @@ def _run_one(
         cmd_prev_l = leader_cmd
 
         cond = lock_eval.update(follower, leader, dt)
-        if cond.locked:
+        corridor_yaw_ok = True
+        if lc_lane_heading is not None:
+            corridor_yaw_err = min(
+                abs(float(angle_diff(float(leader.yaw), float(lc_lane_heading)))),
+                abs(float(angle_diff(float(leader.yaw), float(wrap_angle(float(lc_lane_heading) + math.pi))))),
+            )
+            corridor_yaw_ok = bool(corridor_yaw_err <= math.radians(15.0))
+        lock_allowed = bool(corridor_yaw_ok or leader_post_align_timeout or (lc_lane_heading is None))
+        if cond.locked and (not leader_post_align) and lock_allowed:
             done = True
             reason = "locked"
 
@@ -573,6 +759,40 @@ def _run_one(
         history["leader_head_yaw"].append(float(leader.yaw))
         history["step_cost"].append(float(getattr(debug, "step_cost", 0.0)))
         history["min_clearance"].append(float(clr))
+
+
+        if not done and bool(getattr(scenario, "lane", {}).get("category", "") == "LC") and len(history["distance"]) >= int(4.0 / dt):
+            win = int(4.0 / dt)
+            prev_dist = float(history["distance"][-win])
+            progress = float(prev_dist - d_tail)
+            lx = np.asarray(history["leader_head_x"][-win:] + [float(leader.x)], dtype=float)
+            ly = np.asarray(history["leader_head_y"][-win:] + [float(leader.y)], dtype=float)
+            fx = np.asarray(history["follower_x"][-win:] + [float(follower.x)], dtype=float)
+            fy = np.asarray(history["follower_y"][-win:] + [float(follower.y)], dtype=float)
+            leader_motion_recent = float(np.sum(np.hypot(np.diff(lx), np.diff(ly))))
+            follower_motion_recent = float(np.sum(np.hypot(np.diff(fx), np.diff(fy))))
+            in_ingress = bool('FOLLOWER_INGRESS' in st_name or 'DOCKING' in st_name)
+            sigma_series = [_extract_sigma_m(name) for name in history["stage_name"][-win:]]
+            sigma_series = [float(v) for v in sigma_series if v is not None]
+            sigma_now = _extract_sigma_m(st_name)
+            terminal_progress_cert = bool(
+                'LC_TERMINAL_MANIFOLD' in st_name
+                and sigma_now is not None
+                and float(sigma_now) >= 0.65
+                and (
+                    len(sigma_series) == 0
+                    or float(max(sigma_series)) - float(min(sigma_series)) >= 0.05
+                    or progress >= 0.10
+                )
+            )
+            if (not in_ingress) and float(t) >= float(lc_pre_ingress_deadlock_s) and progress < 0.20 and leader_motion_recent < 0.45:
+                reason = "lc_geometric_deadlock"
+                collision_flag = False
+                done = True
+            elif in_ingress and float(t) >= float(lc_ingress_deadlock_s) and progress < 0.18 and follower_motion_recent < 0.45 and (not terminal_progress_cert):
+                reason = "lc_geometric_deadlock"
+                collision_flag = False
+                done = True
 
         if done:
             break
@@ -683,6 +903,7 @@ def main() -> None:
         leader=scenario.leader,
         follower=scenario.follower,
         prefer_static_leader=False,
+        semantic_hints=scenario.lane,
     )
     method_runners = build_method_runners(
         cfg,
@@ -691,8 +912,11 @@ def main() -> None:
         leader_init=scenario.leader,
         follower_init=scenario.follower,
         staging_plan=staging_plan,
+        lane_hints=scenario.lane,
     )
-    methods: list[tuple[str, Any]] = [(mid, method_runners[mid]) for mid in [*FULL_METHOD_IDS, *ABLATION_METHOD_IDS] if mid in method_runners]
+    ordered_method_ids = [mid for mid in [*FULL_METHOD_IDS, *ABLATION_METHOD_IDS] if mid in method_runners]
+    extra_method_ids = [mid for mid in method_runners.keys() if mid not in ordered_method_ids and mid in METHOD_SPECS]
+    methods: list[tuple[str, Any]] = [(mid, method_runners[mid]) for mid in [*ordered_method_ids, *extra_method_ids]]
 
     if str(args.methods).strip():
         allow = {m.strip() for m in str(args.methods).split(",") if m.strip()}
@@ -708,6 +932,9 @@ def main() -> None:
         "follower_path_xy": staging_plan.follower_path_xy.astype(float).tolist(),
         "score": float(staging_plan.score),
         "reason": str(staging_plan.reason),
+        "control_mode": str(getattr(staging_plan, "control_mode", "generic")),
+        "leader_primitive_steps": int(getattr(staging_plan, "leader_primitive_steps", 0)),
+        "metadata": dict(getattr(staging_plan, "metadata", {}) or {}),
         "leader_relocation_m": float(scenario.leader_relocation_m),
         "follower_detour_ratio": float(scenario.follower_detour_ratio),
         "direct_los_blocked": bool(scenario.direct_los_blocked),

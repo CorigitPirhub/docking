@@ -1,46 +1,57 @@
 {
   "CF_L2": {
-    "scene_id": "DBv1-CF-L2-010",
+    "scene_id": "DBv1-CF-L2-008",
     "split": "test",
     "family": "CF",
     "difficulty": "L2",
-    "seed": 20270716,
+    "seed": 20270454,
     "style": "common_feasible",
     "subset_tag": "Common-Feasible",
     "max_time_s": 18.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L2-010.json"
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L2-008.json"
   },
   "SC_L2": {
-    "scene_id": "DBv1-SC-L2-028",
+    "scene_id": "DBv1-SC-L2-026",
     "split": "test",
     "family": "SC",
     "difficulty": "L2",
-    "seed": 20370716,
+    "seed": 20370454,
     "style": "switching_critical",
     "subset_tag": "Switching-Critical",
     "max_time_s": 28.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L2-028.json"
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L2-026.json"
   },
   "FC_L2": {
-    "scene_id": "DBv1-FC-L2-043",
+    "scene_id": "DBv1-FC-L2-044",
     "split": "test",
     "family": "FC",
     "difficulty": "L2",
-    "seed": 20470323,
+    "seed": 20470454,
     "style": "funnel_critical",
     "subset_tag": "Funnel-Critical",
-    "max_time_s": 34.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L2-043.json"
+    "max_time_s": 30.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L2-044.json"
   },
   "EC_L2": {
-    "scene_id": "DBv1-EC-L2-065",
+    "scene_id": "DBv1-EC-L2-062",
     "split": "test",
     "family": "EC",
     "difficulty": "L2",
-    "seed": 20570847,
+    "seed": 20570454,
     "style": "extension_critical",
     "subset_tag": "Extension-Critical",
     "max_time_s": 38.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-EC-L2-065.json"
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-EC-L2-062.json"
+  },
+  "LC_L2": {
+    "scene_id": "DBv1-LC-L2-080",
+    "split": "test",
+    "family": "LC",
+    "difficulty": "L2",
+    "seed": 20670454,
+    "style": "lane_constrained",
+    "subset_tag": "Lane-Constrained",
+    "max_time_s": 32.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-LC-L2-080.json"
   }
 }

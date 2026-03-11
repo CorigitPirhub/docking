@@ -21,6 +21,7 @@ _METHODS_BY_FAMILY: dict[str, list[str]] = {
     "SC": ["co_bcfd", "T_lattice_pbvs", "T_parking_hierarchical", "T_hard_switch", "A_no_belief_gate", "A_no_fallback"],
     "FC": ["co_bcfd", "T_lattice_pbvs", "T_parking_hierarchical", "A_no_funnel_gate", "A_no_micro_maneuver"],
     "EC": ["co_bcfd", "T_lattice_pbvs", "T_parking_hierarchical", "A_no_stage"],
+    "LC": ["co_bcfd", "T_lattice_pbvs", "T_parking_hierarchical", "T_coop_hard_switch", "A_no_stage"],
 }
 
 
@@ -132,6 +133,14 @@ def _evaluate_scene(scene: dict[str, Any], result: dict[str, Any]) -> dict[str, 
         checks["requires_staging"] = float(scene["scenario"]["leader_relocation_m"]) >= 0.72 - 1e-9
         checks["no_stage_fails"] = not bool(methods["A_no_stage"]["success"])
         checks["blocked"] = bool(scene["scenario"]["direct_los_blocked"])
+    elif family == "LC":
+        checks["lane_constrained"] = bool(scene.get("scenario", {}).get("lane_constrained", False))
+        checks["lane_fidelity"] = bool(scene.get("audit", {}).get("lane_fidelity", False))
+        checks["heading_gap_signal"] = float(descriptors.get("heading_diff_deg", 0.0)) >= 6.0 - 1e-9
+        checks["leader_micro_adjust_needed"] = float(descriptors.get("leader_micro_adjust_budget_m", 0.0)) >= 0.35 - 1e-9
+        checks["reverse_turn_signal"] = float(descriptors.get("leader_reverse_turn_required", 0.0)) >= 0.05 - 1e-9
+        checks["no_stage_fails"] = not bool(methods["A_no_stage"]["success"])
+        checks["coop_baseline_available"] = bool(methods["T_coop_hard_switch"]["success"] or strong_success)
     checks["cell_pass"] = bool(all(checks.values()))
     return {
         "scene_id": str(scene["scene_id"]),
@@ -202,7 +211,7 @@ def main() -> None:
     for family in FAMILIES:
         rows = [row for row in tuning_rows if row["family"] == family]
         rep_row = next((row for row in rep_rows if row["family"] == family and row["difficulty"] == "L2"), None)
-        strong_available = True if family == "EC" else any(bool(row["extras"]["strong_baseline_success"]) for row in rows)
+        strong_available = True if family in {"EC", "LC"} else any(bool(row["extras"]["strong_baseline_success"]) for row in rows)
         family_pass = bool(rows) and all(row["checks"]["cell_pass"] for row in rows) and strong_available and bool(rep_row and rep_row["split"] == "test" and rep_row["checks"]["cell_pass"])
         family_admission[family] = {
             "num_cells": len(rows),

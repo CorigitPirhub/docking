@@ -456,7 +456,7 @@ def main() -> None:
     tuning_manifest = load_manifest(ds_root, split="tuning")
     test_manifest = load_manifest(ds_root, split="test")
     challenge_manifest = load_manifest(ds_root, split="challenge")
-    shared_cache_dirs = [ds_root / "stage0_full_audit_runs"]
+    shared_cache_dirs: list[Path] = []
     protocol_path = out_dir / "P_MINUS1_BASELINE_PROTOCOL.md"
     _write_protocol(protocol_path, tuning=tuning_manifest, test=test_manifest, challenge=challenge_manifest)
 
@@ -519,7 +519,7 @@ def main() -> None:
     rep_gifs: list[str] = []
     if not bool(args.skip_gifs):
         reps = load_representatives(ds_root)
-        rep_specs = [reps["CF_L2"], reps["SC_L2"], reps["FC_L2"], reps["EC_L2"]]
+        rep_specs = [reps["CF_L2"], reps["SC_L2"], reps["FC_L2"], reps["EC_L2"], reps["LC_L2"]]
         for spec in rep_specs:
             family_methods = ["co_bcfd", best_strong_cf]
             if spec.family == "SC":
@@ -528,6 +528,8 @@ def main() -> None:
                 family_methods.append("A_no_funnel_gate")
             elif spec.family == "EC":
                 family_methods.append("A_no_stage")
+            elif spec.family == "LC":
+                family_methods.append("A_no_corridor_reciprocity")
             _run_stage1_once(scene_json=spec.scenario_json, methods=family_methods, out_dir=out_dir, max_time_s=min(float(args.max_time_s), float(spec.max_time_s)), skip_gifs=False, cache_dirs=shared_cache_dirs)
             payload = json.loads(Path(spec.scenario_json).read_text(encoding="utf-8"))
             seed = int(payload["scenario"]["seed"])

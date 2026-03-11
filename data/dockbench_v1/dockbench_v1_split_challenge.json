@@ -1,58 +1,58 @@
 [
   {
-    "scene_id": "DBv1-CF-L1-001",
+    "scene_id": "DBv1-CF-L1-006",
     "split": "challenge",
     "family": "CF",
     "difficulty": "L1",
-    "seed": 20260323,
-    "style": "common_feasible",
-    "subset_tag": "Common-Feasible",
-    "max_time_s": 16.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L1-001.json"
-  },
-  {
-    "scene_id": "DBv1-CF-L2-007",
-    "split": "challenge",
-    "family": "CF",
-    "difficulty": "L2",
-    "seed": 20270323,
+    "seed": 20260978,
     "style": "common_feasible",
     "subset_tag": "Common-Feasible",
     "max_time_s": 18.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L2-007.json"
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L1-006.json"
   },
   {
-    "scene_id": "DBv1-CF-L3-013",
+    "scene_id": "DBv1-CF-L2-012",
     "split": "challenge",
     "family": "CF",
-    "difficulty": "L3",
-    "seed": 20280323,
+    "difficulty": "L2",
+    "seed": 20270978,
     "style": "common_feasible",
     "subset_tag": "Common-Feasible",
     "max_time_s": 20.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L3-013.json"
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L2-012.json"
   },
   {
-    "scene_id": "DBv1-SC-L1-023",
+    "scene_id": "DBv1-CF-L3-018",
+    "split": "challenge",
+    "family": "CF",
+    "difficulty": "L3",
+    "seed": 20280978,
+    "style": "common_feasible",
+    "subset_tag": "Common-Feasible",
+    "max_time_s": 22.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-CF-L3-018.json"
+  },
+  {
+    "scene_id": "DBv1-SC-L1-024",
     "split": "challenge",
     "family": "SC",
     "difficulty": "L1",
-    "seed": 20360847,
+    "seed": 20360978,
     "style": "switching_critical",
     "subset_tag": "Switching-Critical",
-    "max_time_s": 30.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L1-023.json"
+    "max_time_s": 23.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L1-024.json"
   },
   {
-    "scene_id": "DBv1-SC-L2-027",
+    "scene_id": "DBv1-SC-L2-030",
     "split": "challenge",
     "family": "SC",
     "difficulty": "L2",
-    "seed": 20370585,
+    "seed": 20370978,
     "style": "switching_critical",
     "subset_tag": "Switching-Critical",
-    "max_time_s": 28.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L2-027.json"
+    "max_time_s": 29.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L2-030.json"
   },
   {
     "scene_id": "DBv1-SC-L3-036",
@@ -66,15 +66,15 @@
     "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-SC-L3-036.json"
   },
   {
-    "scene_id": "DBv1-FC-L1-037",
+    "scene_id": "DBv1-FC-L1-042",
     "split": "challenge",
     "family": "FC",
     "difficulty": "L1",
-    "seed": 20460323,
+    "seed": 20460978,
     "style": "funnel_critical",
     "subset_tag": "Funnel-Critical",
-    "max_time_s": 28.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L1-037.json"
+    "max_time_s": 24.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L1-042.json"
   },
   {
     "scene_id": "DBv1-FC-L2-048",
@@ -88,15 +88,15 @@
     "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L2-048.json"
   },
   {
-    "scene_id": "DBv1-FC-L3-049",
+    "scene_id": "DBv1-FC-L3-054",
     "split": "challenge",
     "family": "FC",
     "difficulty": "L3",
-    "seed": 20480323,
+    "seed": 20480978,
     "style": "funnel_critical",
     "subset_tag": "Funnel-Critical",
-    "max_time_s": 40.0,
-    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L3-049.json"
+    "max_time_s": 36.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-FC-L3-054.json"
   },
   {
     "scene_id": "DBv1-EC-L1-060",
@@ -130,5 +130,38 @@
     "subset_tag": "Extension-Critical",
     "max_time_s": 44.0,
     "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-EC-L3-072.json"
+  },
+  {
+    "scene_id": "DBv1-LC-L1-078",
+    "split": "challenge",
+    "family": "LC",
+    "difficulty": "L1",
+    "seed": 20660978,
+    "style": "lane_constrained",
+    "subset_tag": "Lane-Constrained",
+    "max_time_s": 27.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-LC-L1-078.json"
+  },
+  {
+    "scene_id": "DBv1-LC-L2-084",
+    "split": "challenge",
+    "family": "LC",
+    "difficulty": "L2",
+    "seed": 20670978,
+    "style": "lane_constrained",
+    "subset_tag": "Lane-Constrained",
+    "max_time_s": 33.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-LC-L2-084.json"
+  },
+  {
+    "scene_id": "DBv1-LC-L3-090",
+    "split": "challenge",
+    "family": "LC",
+    "difficulty": "L3",
+    "seed": 20680978,
+    "style": "lane_constrained",
+    "subset_tag": "Lane-Constrained",
+    "max_time_s": 39.0,
+    "scenario_json": "/home/zzy/TrajectoryPlanning/docking/data/dockbench_v1/scenes/DBv1-LC-L3-090.json"
   }
 ]

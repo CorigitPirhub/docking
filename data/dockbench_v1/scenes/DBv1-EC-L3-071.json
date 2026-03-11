@@ -4,7 +4,7 @@
   "split": "test",
   "family": "EC",
   "difficulty": "L3",
-  "generator_version": "dock_sgen_1.0",
+  "generator_version": "dock_sgen_1.1",
   "max_time_s": 44.0,
   "map": {
     "width_m": 40.0,
@@ -74,16 +74,26 @@
     "homotopy_count": 3.0,
     "dock_zone_clearance_m": 0.0,
     "staging_shift_required_m": 1.4509999999999998,
-    "capture_constraint_index": 0.5704673596275555
+    "capture_constraint_index": 0.4490704812850998,
+    "corridor_width_min_m": 0.0,
+    "bottleneck_ratio": 0.0,
+    "corridor_turn_deg_max": 0.0,
+    "branch_count": 0.0,
+    "drivable_area_ratio": 1.0,
+    "off_lane_shortcut_gap_m": 0.0,
+    "leader_reverse_turn_required": 0.0,
+    "leader_micro_adjust_budget_m": 0.0
   },
   "quality": {
     "valid": true,
     "label_fidelity": true,
-    "diversity_score": 0.6212595526462968,
+    "lane_fidelity": true,
+    "diversity_score": 0.327401093008553,
     "balance_score": 0.33333333333333337,
-    "scene_quality_score": 0.5348816868524078,
-    "raw_diversity_distance": 0.11182671947633342
+    "scene_quality_score": 0.3291807651059871,
+    "raw_diversity_distance": 0.05893219674153954
   },
+  "lane": {},
   "audit": {
     "direct_los_blocked": true,
     "large_obstacle_present": false,
@@ -128,7 +138,10 @@
       ],
       "score": 2.7522,
       "reason": "heuristic_descriptor_estimate"
-    }
+    },
+    "lane_fidelity": true,
+    "off_lane_shortcut_gap_m": 0.0,
+    "leader_reverse_turn_required": 0.0
   },
   "scenario": {
     "seed": 20580847,
@@ -193,6 +206,7 @@
     "follower_detour_ratio": 1.3012000000000004,
     "direct_los_blocked": true,
     "large_obstacle_present": false,
-    "subset_tag": "Extension-Critical"
+    "subset_tag": "Extension-Critical",
+    "lane_constrained": false
   }
 }
