@@ -1013,78 +1013,23 @@ class CorridorReciprocityPlanner:
             pocket_y_max = float(np.max(pocket_polygon[:, 1]))
         else:
             pocket_x_min, pocket_x_max, pocket_y_min, pocket_y_max = bounds_x_min, bounds_x_max, bounds_y_min, bounds_y_max
-        sampling_profile = self._informed_anchor_sampling_profile(
-            lane=lane,
-            leader=leader,
-            anchor_hint_xy=anchor_hint_xy,
-            anchor_hint_yaw=float(anchor_hint_yaw),
-            corridor_polygons=corridor_polygons,
-        )
-        dominant = sampling_profile["dominant_direction"]
-        tangent_vec = np.asarray(sampling_profile["tangent_vec"], dtype=float)
-        normal_vec = np.asarray(sampling_profile["normal_vec"], dtype=float)
-        tangent_offsets = tuple(float(v) for v in sampling_profile["tangent_offsets_m"])
-        normal_offsets = tuple(float(v) for v in sampling_profile["normal_offsets_m"])
-        yaw_offsets_deg = tuple(float(v) for v in sampling_profile["yaw_offsets_deg"])
-        yaw_bases = tuple(float(v) for v in sampling_profile["yaw_bases"])
+        x_offsets = (0.0, -0.25, 0.25, -0.55, 0.55)
+        y_offsets = (0.0, -0.16, 0.16, -0.30, 0.30)
+        heading_gap_regime = str(lane.get("heading_gap_regime", "")).strip().lower()
+        if heading_gap_regime == "large":
+            yaw_offsets_deg = (-35.0, -20.0, 0.0, 20.0, 35.0)
+        elif heading_gap_regime == "medium":
+            yaw_offsets_deg = (-30.0, -15.0, 0.0, 15.0, 30.0)
+        else:
+            yaw_offsets_deg = (-20.0, -10.0, 0.0, 10.0, 20.0)
         seen: set[tuple[int, int, int]] = set()
         certificates: list[BasinReadyCertificate] = []
         stop_generation = False
-        for tangent_offset_m in tangent_offsets:
-            for normal_offset_m in normal_offsets:
-                candidate_xy = anchor_hint_xy + float(tangent_offset_m) * tangent_vec + float(normal_offset_m) * normal_vec
-                anchor_x = float(clamp(float(candidate_xy[0]), pocket_x_min + 0.28, pocket_x_max - 0.28))
-                anchor_y = float(clamp(float(candidate_xy[1]), bounds_y_min + 0.28, bounds_y_max - 0.28))
-                for yaw_base in yaw_bases:
-                    for yaw_offset_deg in yaw_offsets_deg:
-                        anchor_yaw = float(wrap_angle(float(yaw_base) + math.radians(float(yaw_offset_deg))))
-                        key = (int(round(anchor_x / 0.05)), int(round(anchor_y / 0.05)), int(round(math.degrees(anchor_yaw) / 5.0)))
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        anchor = VehicleState(
-                            vehicle_id=int(leader.vehicle_id),
-                            x=float(anchor_x),
-                            y=float(anchor_y),
-                            yaw=float(anchor_yaw),
-                            v=0.0,
-                            delta=0.0,
-                            mode=leader.mode,
-                        )
-                        certificate = self._certificate_from_anchor(
-                            anchor=anchor,
-                            anchor_hint_xy=anchor_hint_xy,
-                            lane_heading=lane_heading,
-                            follower=follower,
-                            obstacles=obstacles,
-                            planner=planner,
-                            corridor_polygons=corridor_polygons,
-                        )
-                        if certificate is not None:
-                            certificates.append(certificate)
-                            if len(certificates) >= 32:
-                                stop_generation = True
-                                break
-                    if stop_generation:
-                        break
-                if stop_generation:
-                    break
-            if stop_generation:
-                break
-        heading_gap_regime = str(lane.get("heading_gap_regime", "")).strip().lower()
-        if heading_gap_regime == "large":
-            legacy_yaw_offsets_deg = (-35.0, -20.0, 0.0, 20.0, 35.0)
-        elif heading_gap_regime == "medium":
-            legacy_yaw_offsets_deg = (-30.0, -15.0, 0.0, 15.0, 30.0)
-        else:
-            legacy_yaw_offsets_deg = (-20.0, -10.0, 0.0, 10.0, 20.0)
-        legacy_x_offsets = (0.0, -0.25, 0.25, -0.55, 0.55, -0.85, 0.85)
-        legacy_y_offsets = (0.0, -0.16, 0.16, -0.30, 0.30)
-        for x_offset in legacy_x_offsets:
+        for x_offset in x_offsets:
             anchor_x = float(clamp(float(anchor_hint_xy[0]) + float(x_offset), pocket_x_min + 0.28, pocket_x_max - 0.28))
-            for y_offset in legacy_y_offsets:
+            for y_offset in y_offsets:
                 anchor_y = float(clamp(float(anchor_hint_xy[1]) + float(y_offset), bounds_y_min + 0.28, bounds_y_max - 0.28))
-                for yaw_offset_deg in legacy_yaw_offsets_deg:
+                for yaw_offset_deg in yaw_offsets_deg:
                     anchor_yaw = float(wrap_angle(float(anchor_hint_yaw) + math.radians(float(yaw_offset_deg))))
                     key = (int(round(anchor_x / 0.05)), int(round(anchor_y / 0.05)), int(round(math.degrees(anchor_yaw) / 5.0)))
                     if key in seen:
@@ -1110,7 +1055,7 @@ class CorridorReciprocityPlanner:
                     )
                     if certificate is not None:
                         certificates.append(certificate)
-                        if len(certificates) >= 32:
+                        if len(certificates) >= 24:
                             stop_generation = True
                             break
                 if stop_generation:
@@ -1121,13 +1066,10 @@ class CorridorReciprocityPlanner:
             key=lambda cert: (
                 -float(cert.sigma_geom),
                 float(np.linalg.norm(cert.anchor.xy() - anchor_hint_xy)),
-                min(
-                    abs(float(angle_diff(float(cert.anchor.yaw), float(dominant.heading)))),
-                    abs(float(angle_diff(float(cert.anchor.yaw), float(anchor_hint_yaw)))),
-                ),
+                abs(float(angle_diff(float(cert.anchor.yaw), float(anchor_hint_yaw)))),
             )
         )
-        return certificates[:16]
+        return certificates[:8]
 
     def _approx_execution_certificate(
         self,
@@ -1466,7 +1408,7 @@ class CorridorReciprocityPlanner:
         )
 
     def _critical_clearance_threshold(self) -> float:
-        return float(max(float(self.cfg.safety.min_clearance) + 0.03, 0.13))
+        return 0.0
 
     def _front_mobility_clearance(
         self,
@@ -1559,15 +1501,25 @@ class CorridorReciprocityPlanner:
     ) -> bool:
         if best_primary_score is None or best_soft_cost is None:
             return True
-        if float(candidate_primary_score) > float(best_primary_score) + float(primary_margin):
-            return True
-        if float(candidate_primary_score) < float(best_primary_score) - float(primary_margin):
-            return False
-        if float(candidate_soft_cost) < float(best_soft_cost) - 1e-9:
-            return True
-        if abs(float(candidate_soft_cost) - float(best_soft_cost)) <= 1e-9 and float(candidate_primary_score) > float(best_primary_score) + 1e-9:
+        if float(candidate_primary_score) > float(best_primary_score) + 1e-9:
             return True
         return False
+
+    def _plan_primary_score(self, plan: CorridorReciprocalPlan | None) -> float:
+        if plan is None:
+            return float("-inf")
+        metadata = dict(plan.metadata or {})
+        return float(
+            0.88 * float(metadata.get("combined_robust_sigma", 0.0))
+            + 0.12 * float(metadata.get("combined_nominal_sigma", 0.0))
+            + 0.05 * float(metadata.get("leader_path_clearance_m", 0.0))
+        )
+
+    def _plan_soft_cost(self, plan: CorridorReciprocalPlan | None) -> float:
+        if plan is None:
+            return float("inf")
+        metadata = dict(plan.metadata or {})
+        return float(metadata.get("soft_path_cost", float("inf")))
 
     def _fast_small_gap_escape_plan(
         self,
@@ -2335,7 +2287,7 @@ class CorridorReciprocityPlanner:
         if best is None:
             return None
         _score, best_state, state_blocks, cmd_blocks, min_clearance_m, cert_meta, nominal_sigma, robust_sigma, combined_nominal, combined_robust = best
-        if combined_robust <= 0.0:
+        if combined_robust < 0.18:
             return None
         full_planner = self._planner(obstacles)
         full_certificate = self._certificate_from_anchor(
@@ -3104,6 +3056,229 @@ class CorridorReciprocityPlanner:
             return None
         return primitive_states, primitive_commands, float(min_clearance_m), int(total_expansions)
 
+    def _search_via_keyframes(
+        self,
+        *,
+        leader: VehicleState,
+        follower: VehicleState,
+        keyframes: tuple[VehicleState, ...],
+        lane_heading: float,
+        obstacles: list[Obstacle],
+        corridor_polygons: list[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray, float, int] | None:
+        current_state = leader.copy()
+        state_blocks: list[np.ndarray] = []
+        command_blocks: list[np.ndarray] = []
+        min_clearance_m = 1e6
+        total_expansions = 0
+        for index, goal_state in enumerate(keyframes):
+            result = self._search_segment(
+                start=current_state,
+                follower=follower,
+                goal=goal_state,
+                lane_heading=lane_heading,
+                obstacles=obstacles,
+                corridor_polygons=corridor_polygons,
+                max_depth=4,
+                max_expansions=240,
+                goal_pos_tol=0.28 if index + 1 < len(keyframes) else 0.30,
+                goal_yaw_tol_deg=26.0 if index + 1 < len(keyframes) else 18.0,
+            )
+            if result is None:
+                return None
+            seg_states, seg_cmds, seg_clear, seg_exp = result
+            if len(seg_states) == 0 or len(seg_cmds) == 0:
+                return None
+            state_blocks.append(np.asarray(seg_states, dtype=float))
+            command_blocks.append(np.asarray(seg_cmds, dtype=float))
+            current_state = VehicleState(
+                vehicle_id=int(leader.vehicle_id),
+                x=float(seg_states[-1, 0]),
+                y=float(seg_states[-1, 1]),
+                yaw=float(seg_states[-1, 2]),
+                v=0.0,
+                delta=0.0,
+                mode=leader.mode,
+            )
+            min_clearance_m = float(min(min_clearance_m, seg_clear))
+            total_expansions += int(seg_exp)
+        if not state_blocks or not command_blocks:
+            return None
+        return np.vstack(state_blocks), np.vstack(command_blocks), float(min_clearance_m), int(total_expansions)
+
+    def _keyframe_reachability_plan(
+        self,
+        *,
+        obstacles: list[Obstacle],
+        leader: VehicleState,
+        follower: VehicleState,
+        lane: dict[str, Any],
+        planner: GridAStarPlanner,
+        corridor_polygons: list[np.ndarray],
+    ) -> CorridorReciprocalPlan | None:
+        semantic_seed = lane.get("leader_stage_path_xy", [])
+        if not isinstance(semantic_seed, list) or len(semantic_seed) < 3:
+            return None
+        seed_xy = np.asarray(semantic_seed, dtype=float)
+        lane_heading = self._lane_heading(lane, default_yaw=float(lane.get("leader_stage_anchor_yaw", leader.yaw)))
+        anchor_hint_xy = np.asarray(lane.get("leader_stage_anchor_xy", [leader.x, leader.y]), dtype=float)
+        keyframes = self.keyframe_synth.build(
+            leader_path_xy=seed_xy,
+            lane_heading=float(lane_heading),
+        )
+        if not keyframes:
+            return None
+        best_plan: CorridorReciprocalPlan | None = None
+        best_primary_score: float | None = None
+        best_soft_cost: float | None = None
+        for cert in self._candidate_anchor_states(
+            leader=leader,
+            follower=follower,
+            lane=lane,
+            obstacles=obstacles,
+            planner=planner,
+            corridor_polygons=corridor_polygons,
+        ):
+            candidate_keyframes = tuple(
+                VehicleState(
+                    vehicle_id=int(leader.vehicle_id),
+                    x=float(kf.x),
+                    y=float(kf.y),
+                    yaw=float(kf.yaw),
+                    v=0.0,
+                    delta=0.0,
+                    mode=leader.mode,
+                )
+                for kf in keyframes
+                if float(np.linalg.norm(np.array([kf.x, kf.y], dtype=float) - cert.anchor.xy())) >= 0.25
+            )
+            for keyframe_state in candidate_keyframes[:4]:
+                search_result = self._search_via_keyframes(
+                    leader=leader,
+                    follower=follower,
+                    keyframes=(keyframe_state, cert.anchor),
+                    lane_heading=float(lane_heading),
+                    obstacles=obstacles,
+                    corridor_polygons=corridor_polygons,
+                )
+                if search_result is None:
+                    continue
+                primitive_states, primitive_cmds, leader_clear, expansions = search_result
+                if float(leader_clear) < float(self._critical_clearance_threshold()):
+                    continue
+                exec_nom, exec_rob, _ = self._robust_execution_certificate(
+                    anchor=cert.anchor,
+                    follower=follower,
+                    obstacles=obstacles,
+                    corridor_polygons=corridor_polygons,
+                    lane_heading=lane_heading,
+                    allow_grid_fallback=False,
+                )
+                term_nom, term_rob, _ = self._robust_terminal_safety_certificate(
+                    anchor=cert.anchor,
+                    follower=follower,
+                    obstacles=obstacles,
+                    corridor_polygons=corridor_polygons,
+                )
+                combined_nom = float(math.sqrt(max(exec_nom, 0.0) * max(term_nom, 0.0)))
+                combined_rob = float(math.sqrt(max(exec_rob, 0.0) * max(term_rob, 0.0)))
+                if float(combined_rob) <= 0.0:
+                    continue
+                leader_path_xy = np.vstack(
+                    [
+                        np.asarray([[float(leader.x), float(leader.y)]], dtype=float),
+                        np.asarray(primitive_states[:, :2], dtype=float),
+                    ]
+                )
+                staging_score, sigma_post = self._staging_candidate_score(
+                    leader_pose=cert.anchor,
+                    follower_pose=follower,
+                    corridor_info={"lane_heading": float(lane_heading)},
+                    sigma_progress=float(cert.sigma_geom),
+                    sigma_terminal_nominal=float(term_nom),
+                    sigma_terminal_robust=float(term_rob),
+                    sigma_corridor_nominal=float(exec_nom),
+                    sigma_corridor_robust=float(exec_rob),
+                    sigma_visibility=1.0,
+                )
+                primary_score = float(
+                    0.98 * staging_score
+                    + 0.82 * combined_rob
+                    + 0.18 * combined_nom
+                    + 0.06 * float(leader_clear)
+                    - 0.01 * float(expansions)
+                )
+                soft_cost, front_clearance_m, longitudinal_offset_m, yaw_error_rad = self._soft_post_path_cost(
+                    path_xy=leader_path_xy,
+                    min_clearance_m=float(leader_clear),
+                    goal_yaw=float(cert.anchor.yaw),
+                    lane_heading=float(lane_heading),
+                    anchor_pose=cert.anchor,
+                    anchor_hint_xy=anchor_hint_xy,
+                    obstacles=obstacles,
+                    corridor_polygons=corridor_polygons,
+                )
+                if not self._prefer_cost_modulated_candidate(
+                    best_primary_score=best_primary_score,
+                    best_soft_cost=best_soft_cost,
+                    candidate_primary_score=float(primary_score),
+                    candidate_soft_cost=float(soft_cost),
+                    primary_margin=0.08,
+                ):
+                    continue
+                best_primary_score = float(primary_score)
+                best_soft_cost = float(soft_cost)
+                best_plan = CorridorReciprocalPlan(
+                    leader_goal=cert.anchor.copy(),
+                    follower_goal=cert.predock.copy(),
+                    leader_path_xy=np.asarray(leader_path_xy, dtype=float),
+                    follower_path_xy=np.asarray(cert.follower_path_xy, dtype=float),
+                    leader_primitive_states=np.asarray(primitive_states, dtype=float),
+                    leader_primitive_cmd=np.asarray(primitive_cmds, dtype=float),
+                    leader_primitive_steps=int(len(primitive_cmds)),
+                    score=float(1.8 - 1.4 * combined_rob),
+                    reason="lc_corridor_keyframe_reachability",
+                    metadata={
+                        "lane_y": float(self._lane_y(lane)),
+                        **self._macro_metadata(lane=lane, leader_ref=leader),
+                        "anchor_hint_xy": [float(anchor_hint_xy[0]), float(anchor_hint_xy[1])],
+                        "anchor_hint_yaw": float(lane.get("leader_stage_anchor_yaw", 0.0)),
+                        "lane_heading": float(lane_heading),
+                        "corridor_polygons": [np.asarray(poly, dtype=float).tolist() for poly in corridor_polygons],
+                        "sigma_c": float(exec_rob),
+                        "sigma_geom": float(cert.sigma_geom),
+                        "sigma_reach": float(exec_nom),
+                        "sigma_post": float(sigma_post),
+                        "exec_nominal_sigma": float(exec_nom),
+                        "exec_robust_sigma": float(exec_rob),
+                        "terminal_nominal_sigma": float(term_nom),
+                        "terminal_robust_sigma": float(term_rob),
+                        "combined_nominal_sigma": float(combined_nom),
+                        "combined_robust_sigma": float(combined_rob),
+                        "soft_path_cost": float(soft_cost),
+                        "front_clearance_m": float(front_clearance_m),
+                        "longitudinal_offset_m": float(longitudinal_offset_m),
+                        "path_yaw_error_deg": float(math.degrees(yaw_error_rad)),
+                        "leader_path_clearance_m": float(leader_clear),
+                        "follower_path_clearance_m": float(cert.follower_path_clearance_m),
+                        "handoff_clearance_m": float(cert.handoff_clearance_m),
+                        "dock_zone_clearance_m": float(cert.dock_zone_clearance_m),
+                        "terminal_path_clearance_m": 0.0,
+                        "alignment_quality": float(cert.alignment_quality),
+                        "candidate_rank": 0,
+                        "search_expansions": int(expansions),
+                        "shape_target_speed": 0.14,
+                        "settle_target_speed": 0.12,
+                        "follower_target_speed": 0.24,
+                        "exec_release_threshold": 0.30,
+                        "exec_robust_threshold": 0.20,
+                        "terminal_release_threshold": 0.16,
+                        "shape_budget_s": 8.0,
+                        "settle_budget_s": 3.0,
+                    },
+                )
+        return best_plan
+
     def _legacy_plan(
         self,
         *,
@@ -3408,7 +3583,7 @@ class CorridorReciprocityExecutor:
         self._leader_hold_goal_override: VehicleState | None = None
 
     def _critical_clearance_threshold(self) -> float:
-        return float(max(float(self.cfg.safety.min_clearance) + 0.03, 0.13))
+        return 0.0
 
     def reset(self) -> None:
         self._phase = "LEADER_SHAPE"
@@ -5413,12 +5588,6 @@ class CorridorReciprocityExecutor:
                 )
             ):
                 return leader_command, self._freeze_vehicle(follower), True, f"FOLLOWER_READY[sigma_m={sigma_terminal:.3f}]"
-            if (
-                handoff_ready
-                and float(tail_distance_m) <= 0.80
-                and float(self._terminal_stall_time) >= 0.80
-            ):
-                return self._freeze_vehicle(leader), self._freeze_vehicle(follower), True, "LEADER_POST_ALIGN_TIMEOUT"
             follower_command, closure_substage = self.terminal_capture_command(
                 leader=leader,
                 follower=follower,

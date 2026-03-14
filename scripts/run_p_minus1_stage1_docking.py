@@ -537,25 +537,8 @@ def _run_one(
         follower_cmd = _boundary_guard_command(follower, follower_cmd, cfg)
 
         follower_substage = str(getattr(debug, 'follower_substage', ''))
-        leader_post_align = bool(follower_substage == 'LEADER_POST_ALIGN')
-        lc_hold_requested = bool(
-            follower_substage == 'LC_LOCK_HOLD'
-            or follower_substage == 'LEADER_POST_ALIGN_TIMEOUT'
-            or follower_substage == 'LEADER_POST_ALIGN_DIVERGE'
-            or follower_substage == 'LEADER_POST_ALIGN_BLOCKED'
-            or follower_substage.startswith('FOLLOWER_READY')
-        )
-        if leader_post_align:
-            leader_new = model.step(leader, leader_cmd, dt)
-            follower_new = _project_follower_locked(
-                geom,
-                follower,
-                leader_new,
-                collision=collision,
-                obstacles=scenario.obstacles,
-                clearance_floor=float(cfg.safety.min_clearance) + 0.005,
-            )
-        elif lc_hold_requested:
+        lc_hold_requested = bool(follower_substage == 'LC_LOCK_HOLD' or follower_substage.startswith('FOLLOWER_READY'))
+        if lc_hold_requested:
             p_err_hold = float(np.linalg.norm(geom.front_hitch(follower) - geom.rear_hitch(leader)))
             yaw_gap_hold = abs(float(angle_diff(float(leader.yaw), float(follower.yaw))))
             clr_hold = float(
@@ -653,22 +636,10 @@ def _run_one(
             and str(getattr(debug, 'follower_substage', '')) == 'LOCK_ASSIST'
         )
         lc_lock_hold = bool(str(getattr(debug, 'follower_substage', '')) == 'LC_LOCK_HOLD')
-        leader_post_align = bool(str(getattr(debug, 'follower_substage', '')) == 'LEADER_POST_ALIGN')
-        leader_post_align_timeout = bool(str(getattr(debug, 'follower_substage', '')) in {'LEADER_POST_ALIGN_TIMEOUT', 'LEADER_POST_ALIGN_DIVERGE', 'LEADER_POST_ALIGN_BLOCKED'})
-        corridor_yaw_misaligned = False
-        if lc_lane_heading is not None:
-            corridor_yaw_err_pre = min(
-                abs(float(angle_diff(float(leader.yaw), float(lc_lane_heading)))),
-                abs(float(angle_diff(float(leader.yaw), float(wrap_angle(float(lc_lane_heading) + math.pi))))),
-            )
-            corridor_yaw_misaligned = bool(corridor_yaw_err_pre > math.radians(15.0))
         soft_capture_distance = float(0.85 if certified_terminal_projection else cfg.docking.soft_capture_distance)
         soft_capture_yaw = math.radians(float(8.0 if certified_terminal_projection else cfg.docking.soft_capture_max_yaw_deg))
         soft_capture_speed = float(0.50 if certified_terminal_projection else cfg.docking.soft_capture_max_speed_error)
         if (
-            (not leader_post_align)
-            and (not corridor_yaw_misaligned)
-            and
             (not lc_lock_hold)
             and
             p_err_pre < soft_capture_distance
@@ -709,15 +680,7 @@ def _run_one(
         cmd_prev_l = leader_cmd
 
         cond = lock_eval.update(follower, leader, dt)
-        corridor_yaw_ok = True
-        if lc_lane_heading is not None:
-            corridor_yaw_err = min(
-                abs(float(angle_diff(float(leader.yaw), float(lc_lane_heading)))),
-                abs(float(angle_diff(float(leader.yaw), float(wrap_angle(float(lc_lane_heading) + math.pi))))),
-            )
-            corridor_yaw_ok = bool(corridor_yaw_err <= math.radians(15.0))
-        lock_allowed = bool(corridor_yaw_ok or leader_post_align_timeout or (lc_lane_heading is None))
-        if cond.locked and (not leader_post_align) and lock_allowed:
+        if cond.locked:
             done = True
             reason = "locked"
 

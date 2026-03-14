@@ -397,7 +397,6 @@
    - 因此，round-13 的 retained 结论是：**LC family 的安全红线已恢复为 0 collision，剩余问题已经纯化为 9 个 `lc_geometric_deadlock` 的 basin coverage**；本轮仍不升级为 frozen full `Stage-2` 主报告。
 
 7. Stage-2.5 历史完成情况（pre-LC 4-family split，仅供参考）：
-7. Stage-2.5 历史完成情况（pre-LC 4-family split，仅供参考）：
    - **范围说明**：以下 `48/48`、`collision=0` 与 `avg_T_done` 结论均基于引入 `LC` 之前的 `4-family / 48-test` frozen split，当前尚未在 `5-family / 60-test` benchmark 上重跑。
    - **独立分支已落地**：`TVT / VPCR` 已从“散落在主逻辑里的阈值修补”重构为真正独立的 mode / subskill 分支；代码位于 `docking/stage25_subskills.py`，运行时接线在 `docking/dock_skill.py`，冻结回归脚本为 `scripts/run_stage25_branch_eval.py`。
    - **当前主线口径**：从设计/论文叙事上，`co_bcfd` 不再被视为“`CGFL + TVT + VPCR + PTCC` 四个补丁模块”的叠加，而被统一表述为：`belief-consistent capture-funnel + 证书场约束策略`。其中 `CGFL + PTCC` 共同收敛到 `进展证书`，`TVT + terminal capture boost + CTP` 共同收敛到 `终端证书`，`VPCR` 收敛到 `可见性证书`；代码实现上仍分别落在 `docking/dock_skill.py`、`docking/stage25_subskills.py`、`docking/time_compression.py`。

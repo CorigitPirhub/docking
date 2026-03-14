@@ -811,6 +811,13 @@ Stage-1 已切换到 `DockBench-v1` 的 frozen representative protocol：
 
 因此，本轮结果**仍不应被写成“Stage-2 达标”**。round-13 虽然已经把 `LC` 子集碰撞压到 `0`，并把关键单案 gate 稳定保住，但 `LC` targeted regression 仍只有 `3/12` 成功，因此本轮仍没有把该分支升级为新的 frozen full Stage-2 主报告；当前能够保留到设计书中的，是“安全问题已被清零，剩余瓶颈纯化为 basin coverage”的更精确阶段性结论。
 
+16. **Round-18 restored baseline（当前恢复实现）**：当前代码基线已手动恢复到 `artifacts/lc_round18_lc12_regression/lc_round18_lc12_regression.md` 对应的实现口径，即：
+   - `LC` 仍采用 `UnifiedCertificateField + StagingCertificateOptimizer` 框架；
+   - `\sigma_{post}` 只作为 **soft scoring bias** 保留在 planning 侧；
+   - 不再启用后续实验轮次中引入的 `front_clearance / longitudinal_offset` 软代价主导逻辑；
+   - 不再把 `LEADER_POST_ALIGN` 作为 lock gate 的强制前置条件，恢复 round-18 的“先完成对接、再接受姿态偏差”口径。
+   - 按该恢复实现重新验证时，关键样例与 round-18 记录重新对齐：`DBv1-LC-L1-073` 回到 `collision_obstacle`，`DBv1-LC-L2-081 / DBv1-LC-L2-083` 回到 `success=True` 且终态航向分别约为 `30.08° / -34.37°`；对应实验结果位于 `output/round18_restore2/`。
+
 ### 10.1 Stage-2.5 历史结果（pre-LC 4-family split，2026-03-07）
 > 注意：以下 `48/48` 与 `avg_T_done` 结论均基于**引入 `LC` 之前**的 `4-family / 48-test` frozen split；在当前 `5-family / 60-test` benchmark 上尚未重跑，因此只能视为历史结果，不能直接作为当前 gate 结论。
 - 当前 Stage-2.5 已把 `TVT / VPCR` 落成**真正独立的 mode / subskill 分支**：核心代码位于 `docking/stage25_subskills.py`，运行时接线位于 `docking/dock_skill.py`，冻结回归脚本位于 `scripts/run_stage25_branch_eval.py`。

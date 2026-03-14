@@ -974,69 +974,14 @@ class CooperativeDockingSkill:
                 debug_substage = "FORCED_DOCK"
         else:
             corridor_yaw_error = float(self._corridor_parallel_yaw_error(yaw=float(leader.yaw)))
-            post_align_needed = bool(
-                self._semantic_lane_plan
-                and self._lane_heading_target is not None
-                and d_tail <= 1.25
-                and corridor_yaw_error > math.radians(12.0)
-            )
-            if post_align_needed and self._leader_post_align_total_time >= 5.0:
-                self._leader_post_align_failed = True
-            if (
-                (not self._leader_post_align_active)
-                and post_align_needed
-                and (not self._leader_post_align_failed)
-                and self._leader_post_align_attempts < 6
-            ):
-                self._leader_post_align_active = True
-                self._leader_post_align_attempts += 1
-                self._leader_post_align_time = 0.0
-                self._leader_post_align_best_error = float(corridor_yaw_error)
-                self._leader_post_align_entry_error = float(corridor_yaw_error)
-                self._leader_post_align_prev_error = float(corridor_yaw_error)
-                self._leader_post_align_diverge_count = 0
-                self._leader_post_align_failure_reason = ""
+            post_align_needed = False
             lc_terminal_hold = bool(
                 self._semantic_lane_plan
                 and d_tail <= float(self.cfg.docking.lock_position_tol) + 0.08
                 and (not self._leader_post_align_active)
-                and (corridor_yaw_error <= math.radians(15.0) or self._leader_post_align_failed)
             )
             # Keep leader steady during final docking.
-            if self._leader_post_align_active:
-                leader_cmd, align_error, align_done, align_blocked = self._leader_post_align_command(leader=leader, follower=follower)
-                self._leader_post_align_time += float(self.cfg.control.dt)
-                self._leader_post_align_total_time += float(self.cfg.control.dt)
-                self._leader_post_align_best_error = float(min(self._leader_post_align_best_error, align_error))
-                if float(corridor_yaw_error) > float(self._leader_post_align_best_error) + math.radians(1.5):
-                    self._leader_post_align_diverge_count += 1
-                else:
-                    self._leader_post_align_diverge_count = max(0, int(self._leader_post_align_diverge_count) - 1)
-                if float(corridor_yaw_error) > float(self._leader_post_align_entry_error) + math.radians(3.0):
-                    self._leader_post_align_diverge_count = max(2, int(self._leader_post_align_diverge_count))
-                if align_done:
-                    self._leader_post_align_active = False
-                    self._leader_post_align_time = 0.0
-                    self._leader_post_align_prev_error = float(align_error)
-                elif align_blocked:
-                    self._leader_post_align_active = False
-                    self._leader_post_align_failed = True
-                    self._leader_post_align_time = 0.0
-                    self._leader_post_align_failure_reason = "LEADER_POST_ALIGN_BLOCKED"
-                    leader_cmd = self._freeze_vehicle(leader)
-                elif self._leader_post_align_diverge_count >= 2:
-                    self._leader_post_align_active = False
-                    self._leader_post_align_failed = True
-                    self._leader_post_align_time = 0.0
-                    self._leader_post_align_failure_reason = "LEADER_POST_ALIGN_DIVERGE"
-                    leader_cmd = self._freeze_vehicle(leader)
-                elif self._leader_post_align_total_time >= 5.0:
-                    self._leader_post_align_active = False
-                    self._leader_post_align_failed = True
-                    self._leader_post_align_time = 0.0
-                    self._leader_post_align_failure_reason = "LEADER_POST_ALIGN_TIMEOUT"
-                self._leader_post_align_prev_error = float(corridor_yaw_error)
-            elif lc_terminal_hold and abs(float(leader.v)) > 1e-3:
+            if lc_terminal_hold and abs(float(leader.v)) > 1e-3:
                 leader_cmd = ControlCommand(
                     accel=float(-math.copysign(float(self.cfg.vehicle.max_decel), float(leader.v))),
                     steer_rate=float(-leader.delta / max(self.cfg.control.dt, 1e-3)),
@@ -1073,16 +1018,7 @@ class CooperativeDockingSkill:
             else:
                 self._near_field_active = True
                 # Near-field: capture-funnel + MPPI micro-maneuver + lock assist.
-                if self._leader_post_align_active:
-                    follower_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
-                    self._follower_substage = "LEADER_POST_ALIGN"
-                    debug_substage = "LEADER_POST_ALIGN"
-                elif post_align_needed and self._leader_post_align_failed:
-                    follower_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
-                    failure_reason = str(self._leader_post_align_failure_reason or "LEADER_POST_ALIGN_TIMEOUT")
-                    self._follower_substage = failure_reason
-                    debug_substage = failure_reason
-                elif not have_global:
+                if not have_global:
                     follower_cmd = ControlCommand(accel=0.0, steer_rate=0.0)
                     fallback_global = True
                     fallback_reason = "missing_global"
